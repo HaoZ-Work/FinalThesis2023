@@ -21,6 +21,10 @@ input_paths = {
         'dev': './data/csqa/dev_rand_split.jsonl',
         'test': './data/csqa/test_rand_split_no_answers.jsonl',
     },
+    'csqa_analyze': {
+        'dev': './analysis/wrong_predicted_questions_dev.jsonl',
+        'test': './analysis/wrong_predicted_questions_test.jsonl',
+    },
     'riddle': {
         'train': './data/riddle/train.jsonl',
         'dev':   './data/riddle/devIH.jsonl',
@@ -65,6 +69,21 @@ output_paths = {
             'adj-dev': './data/csqa/graph/dev.graph.adj.pk',
             'adj-test': './data/csqa/graph/test.graph.adj.pk',
         },
+    },
+    'csqa_analyze': {
+        'statement': {
+            'dev': './analysis/wrong_predicted_questions_dev.statement.jsonl',
+            'test': './analysis/wrong_predicted_questions_test.statement.jsonl',
+        },
+        'grounded': {
+            'dev': './analysis/wrong_predicted_questions_dev.grounded.jsonl',
+            'test': './analysis/wrong_predicted_questions_test.grounded.jsonl',
+        },
+        'graph': {
+            'adj-dev': './analysis/wrong_predicted_questions_dev.graph.adj.pk',
+            'adj-test': './analysis/wrong_predicted_questions_test.graph.adj.pk',
+        }
+
     },
     'riddle': {
         'statement': {
@@ -127,7 +146,7 @@ for dname in ['medqa']:
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--run', default=['common', 'csqa', 'obqa'], nargs='+')
+    parser.add_argument('--run', default=['common', 'csqa', 'obqa','csqa_analyze'], nargs='+')
     parser.add_argument('-p', '--nprocs', type=int, default=cpu_count(), help='number of processes to use')
     parser.add_argument('--debug', action='store_true', help='enable debug mode')
 
@@ -161,7 +180,16 @@ def main():
             {'func': generate_adj_data_from_grounded_concepts__use_LM, 'args': (output_paths['csqa']['grounded']['dev'], output_paths['cpnet']['pruned-graph'], output_paths['cpnet']['vocab'], output_paths['csqa']['graph']['adj-dev'], args.nprocs)},
             {'func': generate_adj_data_from_grounded_concepts__use_LM, 'args': (output_paths['csqa']['grounded']['test'], output_paths['cpnet']['pruned-graph'], output_paths['cpnet']['vocab'], output_paths['csqa']['graph']['adj-test'], args.nprocs)},
         ],
-
+        'csqa_analyze': [
+            {'func': convert_to_entailment, 'args': (input_paths['csqa_analyze']['dev'], output_paths['csqa_analyze']['statement']['dev'])},
+            {'func': convert_to_entailment, 'args': (input_paths['csqa_analyze']['test'], output_paths['csqa_analyze']['statement']['test'])},
+            {'func': ground, 'args': (output_paths['csqa_analyze']['statement']['dev'], output_paths['cpnet']['vocab'],
+                                      output_paths['cpnet']['patterns'], output_paths['csqa_analyze']['grounded']['dev'], args.nprocs)},
+            {'func': ground, 'args': (output_paths['csqa_analyze']['statement']['test'], output_paths['cpnet']['vocab'],
+                                      output_paths['cpnet']['patterns'], output_paths['csqa_analyze']['grounded']['test'], args.nprocs)},
+            {'func': generate_adj_data_from_grounded_concepts__use_LM, 'args': (output_paths['csqa_analyze']['grounded']['dev'], output_paths['cpnet']['pruned-graph'], output_paths['cpnet']['vocab'], output_paths['csqa_analyze']['graph']['adj-dev'], args.nprocs)},
+            {'func': generate_adj_data_from_grounded_concepts__use_LM, 'args': (output_paths['csqa_analyze']['grounded']['test'], output_paths['cpnet']['pruned-graph'], output_paths['cpnet']['vocab'], output_paths['csqa_analyze']['graph']['adj-test'], args.nprocs)},
+        ],
         'riddle': [
             {'func': convert_to_entailment, 'args': (input_paths['riddle']['train'], output_paths['riddle']['statement']['train'])},
             {'func': convert_to_entailment, 'args': (input_paths['riddle']['dev'], output_paths['riddle']['statement']['dev'])},
