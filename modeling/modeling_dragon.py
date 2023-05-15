@@ -35,6 +35,14 @@ else:
     PreTrainedModelClass = modeling_roberta.RobertaPreTrainedModel
 print ('PreTrainedModelClass', PreTrainedModelClass)
 
+
+class Args:
+    def __init__(self):
+        self.residual_ie = 2
+        self.fp16 = False
+        self.upcast = False
+
+
 class DRAGON(nn.Module):
 
     def __init__(self, args={}, model_name="roberta-large", k=5, n_ntype=4, n_etype=38,
@@ -157,7 +165,7 @@ class DRAGON(nn.Module):
 
 
 def test_DRAGON(device):
-    cp_emb = torch.load("data/cpnet/cp_emb.pt")
+    cp_emb = torch.load("/home/dtdysh/FinalThesis2023/data/cpnet/cp_emb.pt")
     model = DRAGON(pretrained_concept_emb=cp_emb).to(device)
     inputs = model.get_fake_inputs(device)
     outputs = model(*inputs)
@@ -1156,7 +1164,7 @@ class TextKGMessagePassing(ModelClass):
         node_type[:, 0] = 3
         node_score = torch.zeros([bs, n_node, 1]).to(device)
         node_score[:, 1] = 180
-        return input_ids, token_type_ids, attention_mask, H, A,  node_type, node_score
+        return input_ids, token_type_ids, attention_mask, [], H, A,  node_type, node_score, []
 
     def check_outputs(self, outputs, gnn_output):
         bs = 20
@@ -1167,7 +1175,8 @@ class TextKGMessagePassing(ModelClass):
 
 
 def test_TextKGMessagePassing(device):
-    model = TextKGMessagePassing.from_pretrained("roberta-large", output_hidden_states=True).to(device)
+    test_args = Args()
+    model = TextKGMessagePassing.from_pretrained("roberta-large", output_hidden_states=True, args=test_args, k=5).to(device)
     inputs = model.get_fake_inputs(device)
     outputs = model(*inputs)
     model.check_outputs(*outputs)
@@ -1178,7 +1187,7 @@ from modeling.modeling_bert_custom import BertEncoder
 
 class RoBERTaGAT(BertEncoder):
 
-    def __init__(self, config, args, k=5, n_ntype=4, n_etype=38, hidden_size=200, dropout=0.2, concept_dim=200, ie_dim=200, p_fc=0.2, info_exchange=True, ie_layer_num=1, sep_ie_layers=False):
+    def __init__(self, config, args={}, k=5, n_ntype=4, n_etype=38, hidden_size=200, dropout=0.2, concept_dim=200, ie_dim=200, p_fc=0.2, info_exchange=True, ie_layer_num=1, sep_ie_layers=False):
 
         super().__init__(config, args)
 
@@ -1284,7 +1293,7 @@ class RoBERTaGAT(BertEncoder):
         _node_type[:, 0] = 3
         _node_type = _node_type.view(-1)
         _node_feature_extra = torch.zeros([bs * n_node, self.concept_dim]).to(device)
-        return hidden_states, attention_mask, head_mask, _X, edge_index, edge_type, _node_type, _node_feature_extra
+        return hidden_states, attention_mask,[], head_mask, _X, edge_index, edge_type, _node_type, _node_feature_extra,[]
 
     def check_outputs(self, outputs, _X):
         bs = 20
@@ -1301,7 +1310,12 @@ def test_RoBERTaGAT(device):
         force_download=False,
         output_hidden_states=True
     )
-    model = RoBERTaGAT(config, sep_ie_layers=True).to(device)
+
+
+
+    test_args = Args()
+    model = RoBERTaGAT(config, args=test_args, sep_ie_layers=True).to(device)
+    print(model)
     inputs = model.get_fake_inputs(device)
     outputs = model(*inputs)
     model.check_outputs(*outputs)
@@ -1313,13 +1327,15 @@ if __name__ == "__main__":
                         level=logging.INFO)
 
     utils.print_cuda_info()
-    free_gpus = utils.select_free_gpus()
-    device = torch.device("cuda:{}".format(free_gpus[0]))
+    # free_gpus = utils.select_free_gpus()
+    # device = torch.device("cuda:{}".format(free_gpus[0]))
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+
 
     # test_RoBERTaGAT(device)
 
-    # test_TextKGMessagePassing(device)
+    test_TextKGMessagePassing(device)
 
     # test_LMGNN(device)
 
-    test_DRAGON(device)
+    #test_DRAGON(device)
