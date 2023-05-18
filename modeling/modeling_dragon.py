@@ -42,6 +42,12 @@ class Args:
         self.fp16 = False
         self.upcast = False
 
+        # For LMGNN class
+        self.mlm_task = False
+        self.link_task = False
+        self.no_node_score = True
+        self.end_task = True
+
 
 class DRAGON(nn.Module):
 
@@ -165,7 +171,7 @@ class DRAGON(nn.Module):
 
 
 def test_DRAGON(device):
-    cp_emb = torch.load("/home/dtdysh/FinalThesis2023/data/cpnet/cp_emb.pt")
+    cp_emb = torch.load("../data/cpnet/cp_emb.pt")
     model = DRAGON(pretrained_concept_emb=cp_emb).to(device)
     inputs = model.get_fake_inputs(device)
     outputs = model(*inputs)
@@ -688,20 +694,32 @@ class LMGNN(PreTrainedModelClass):
         node_score = torch.zeros([bs, n_node, 1]).to(device)
         node_score[:, 1] = 180
 
-        return (input_ids, attention_mask, token_type_ids, None), concept_ids, node_type, node_score, adj_lengths, adj
+        # if link_task == False:
+        lp_data = []
+        return (None, None, input_ids, attention_mask, token_type_ids, None), concept_ids, node_type, node_score, adj_lengths, [], adj, lp_data
 
-    def check_outputs(self, logits, pool_attn):
+    # def check_outputs(self, logits, pool_attn):
+    #     bs = 20
+    #     assert logits.size() == (bs, 1)
+    #     n_edges = 3
+    #
+    def check_outputs(self, logits):
         bs = 20
         assert logits.size() == (bs, 1)
         n_edges = 3
 
 
 def test_LMGNN(device):
-    cp_emb = torch.load("data/cpnet/cp_emb.pt")
-    model = LMGNN(pretrained_concept_emb=cp_emb).to(device)
+    cp_emb = torch.load("../data/cpnet/cp_emb.pt")
+    test_args =Args()
+    # model = LMGNN(pretrained_concept_emb=cp_emb).to(device)
+    model,loading_info = LMGNN.from_pretrained("t5-small", args=test_args, pretrained_concept_emb=cp_emb, output_loading_info=True,model_name="t5-small",k=5)
+    model.to(device)
+    print(model)
+    print(loading_info)
     inputs = model.get_fake_inputs(device)
     outputs = model(*inputs)
-    model.check_outputs(*outputs)
+    model.check_outputs(outputs[0])
 
 
 if INHERIT_BERT:
@@ -1341,8 +1359,8 @@ if __name__ == "__main__":
 
     # test_RoBERTaGAT(device)
 
-    test_TextKGMessagePassing(device)
+    # test_TextKGMessagePassing(device)
 
-    # test_LMGNN(device)
+    test_LMGNN(device)
 
     #test_DRAGON(device)
