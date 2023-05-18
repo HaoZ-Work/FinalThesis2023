@@ -768,6 +768,7 @@ class TextKGMessagePassing(ModelClass):
         # So we can broadcast to [batch_size, num_heads, from_seq_length, to_seq_length]
         # this attention mask is more simple than the triangular masking of causal attention
         # used in OpenAI GPT, we just need to prepare the broadcast dimension here.
+
         if len(attention_mask.size()) == 2:
             extended_attention_mask = attention_mask.unsqueeze(1).unsqueeze(2)
         elif len(attention_mask.size()) == 3:
@@ -782,6 +783,7 @@ class TextKGMessagePassing(ModelClass):
         # effectively the same as removing these entirely.
         extended_attention_mask = extended_attention_mask.to(dtype=next(self.parameters()).dtype) # fp16 compatibility
         extended_attention_mask = (1.0 - extended_attention_mask) * -10000.0
+        # extended_attention_mask [20,1,1,100]
 
         # Prepare head mask if needed
         # 1.0 in head_mask indicate we keep the head
@@ -799,7 +801,7 @@ class TextKGMessagePassing(ModelClass):
             head_mask = [None] * self.config.num_hidden_layers
 
         embedding_output = self.embeddings(input_ids, position_ids=position_ids, token_type_ids=token_type_ids)
-
+        # embedding_output (20,100,768) 20:batch_size, 100:seq_len, 768:embed_size
         # GNN inputs
         _batch_size, _n_nodes = node_type.size()
 
@@ -833,15 +835,19 @@ class TextKGMessagePassing(ModelClass):
 
         # LM outputs
         sequence_output = encoder_outputs[0]
+        #sequence_output (20,100,768) 20:batch_size, 100:seq_len, 768:embed_size
         pooled_output = self.pooler(sequence_output)
-
+        # pooled_output (20,768) (batch_size, hidden_size)
         outputs = (sequence_output, pooled_output,) + encoder_outputs[1:]  # add hidden_states and attentions if they are here
+        # outputs[0] (20,100,768) 20:batch_size, 100:seq_len, 768:embed_size
 
         # GNN outputs
         X = _X.view(node_type.size(0), node_type.size(1), -1) #[batch_size, n_node, dim]
-
+        # X (20,200,200)  20:batch_size, 200:n_node, 200:dim
+        # _X (4000,200) 4000:batch_size*n_node, 200:dim
         output = self.activation(self.Vh(H) + self.Vx(X))
         output = self.dropout(output)
+        # output (20,200,200) 20:batch_size, 200:n_node, 200:dim
 
         return outputs, output
 
@@ -1176,7 +1182,8 @@ class TextKGMessagePassing(ModelClass):
 
 def test_TextKGMessagePassing(device):
     test_args = Args()
-    model = TextKGMessagePassing.from_pretrained("roberta-large", output_hidden_states=True, args=test_args, k=5).to(device)
+    model = TextKGMessagePassing.from_pretrained("roberta-base", output_hidden_states=True, args=test_args, k=5).to(device)
+    print(model)
     inputs = model.get_fake_inputs(device)
     outputs = model(*inputs)
     model.check_outputs(*outputs)
