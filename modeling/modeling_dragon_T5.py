@@ -29,13 +29,594 @@ class Args:
         self.fp16 = False
         self.upcast = False
 
+        # For LMGNN class
+        self.mlm_task = True
+        self.link_task = False
+        self.no_node_score = True
+        self.end_task = True
+
 try:
     from transformers import modeling_t5
 except:
     from transformers.models.t5 import modeling_t5
 
+
+
+
+
+
+
 ModelClass = modeling_t5.T5Model
 # ModelClass = T5EncoderModel
+
+
+PreTrainedModelClass = modeling_t5.T5PreTrainedModel
+print("PreTrainedModelClass:", PreTrainedModelClass)
+
+class LMGNN(PreTrainedModelClass):
+
+    def __init__(self, config, args={}, model_name="roberta-large", k=5, n_ntype=4, n_etype=38,
+                 n_concept=799273, concept_dim=200, concept_in_dim=1024, n_attention_head=2,
+                 fc_dim=200, n_fc_layer=0, p_emb=0.2, p_gnn=0.2, p_fc=0.2,
+                 pretrained_concept_emb=None, freeze_ent_emb=True,
+                 init_range=0.02, ie_dim=200, info_exchange=True, ie_layer_num=1, sep_ie_layers=False, layer_id=-1):
+        super().__init__(config)
+        self.args = args
+        self.config = config
+
+        self.init_range = init_range
+
+        self.k = k
+        self.concept_dim = concept_dim
+        self.n_attention_head = n_attention_head
+        self.activation = layers.GELU()
+        if k >= 0:
+            self.concept_emb = layers.CustomizedEmbedding(concept_num=n_concept, concept_out_dim=concept_dim, use_contextualized=False, concept_in_dim=concept_in_dim, pretrained_concept_emb=pretrained_concept_emb, freeze_ent_emb=freeze_ent_emb)
+            self.pooler = layers.MultiheadAttPoolLayer(n_attention_head, config.hidden_size, concept_dim)
+
+        concat_vec_dim = concept_dim * 2 + config.hidden_size if k>=0 else config.hidden_size
+        self.fc = layers.MLP(concat_vec_dim, fc_dim, 1, n_fc_layer, p_fc, layer_norm=True)
+
+        self.dropout_e = nn.Dropout(p_emb)
+        self.dropout_fc = nn.Dropout(p_fc)
+
+        if init_range > 0:
+            self.apply(self._init_weights)
+
+        self.t5 = TextKGMessagePassing(config, args=args, k=k, n_ntype=n_ntype, n_etype=n_etype, dropout=p_gnn,
+                                         concept_dim=concept_dim, ie_dim=ie_dim, p_fc=p_fc, info_exchange=info_exchange,
+                                         ie_layer_num=ie_layer_num,
+                                         sep_ie_layers=sep_ie_layers)  # this is equivalent to BertModel
+
+        if args.mlm_task:
+            self.lm_head = nn.Linear(config.d_model, config.vocab_size, bias=False)
+
+        self.layer_id = layer_id
+        self.cpnet_vocab_size = n_concept
+
+        if args.link_task:
+            if args.link_decoder == 'DistMult':
+                self.linkpred = modeling_gnn.DistMultDecoder(args, num_rels=n_etype, h_dim=concept_dim)
+            elif args.link_decoder == 'TransE':
+                self.linkpred = modeling_gnn.TransEDecoder(args, num_rels=n_etype, h_dim=concept_dim)
+            elif args.link_decoder == 'RotatE':
+                self.linkpred = modeling_gnn.RotatEDecoder(args, num_rels=n_etype, h_dim=concept_dim)
+            else:
+                raise NotImplementedError
+            if args.link_proj_headtail:
+                self.linkpred_proj = nn.Linear(concept_dim, concept_dim)
+            if args.link_normalize_headtail == 3:
+                self.emb_LayerNorm = nn.LayerNorm(concept_dim)
+
+    def _init_weights(self, module):
+        """ Initialize the weights
+
+        It works for:
+            CustomizedEmbedding layer
+            MultiheadAttPoolLayer layer
+            MLP layer
+        """
+
+        if isinstance(module, (nn.Linear, nn.Embedding)):
+            # print("module: ", module)
+            module.weight.data.normal_(mean=0.0, std=self.init_range)
+            if hasattr(module, 'bias') and module.bias is not None:
+                module.bias.data.zero_()
+            # print("module.weight", module.weight)
+
+        elif isinstance(module, nn.LayerNorm):
+            # print("module: ", module)
+            module.bias.data.zero_()
+            module.weight.data.fill_(1.0)
+            # print("module.weight", module.weight)
+
+    def forward(self, inputs, concept_ids, node_type_ids, node_scores, adj_lengths, special_nodes_mask, adj, lp_data, emb_data=None, cache_output=False):
+        """
+        concept_ids: (batch_size, n_node)
+        adj_lengths: (batch_size,)
+        node_type_ids: (batch_size, n_node)
+            0 == question entity; 1 == answer choice entity; 2 == other node; 3 == context node
+        node_scores: (batch_size, n_node, 1)
+        adj: edge_index, edge_type
+        lp_data: pos_triples, neg_nodes
+
+        returns:
+        logits: [bs]
+        """
+        #LM inputs
+        lm_input_ids, lm_labels, input_ids, attention_mask, token_type_ids, output_mask = inputs
+        # if self.args.mlm_task: #TODO: what is this?
+        #     input_ids = lm_input_ids
+
+        # GNN inputs
+        concept_ids[concept_ids == 0] = self.cpnet_vocab_size + 2
+        if self.k >= 0:
+            gnn_input = self.concept_emb(concept_ids - 1, emb_data).to(node_type_ids.device)
+        else:
+            gnn_input = torch.zeros((concept_ids.size(0), concept_ids.size(1), self.concept_dim)).float().to(node_type_ids.device)
+        gnn_input[:, 0] = 0
+        gnn_input = self.dropout_e(gnn_input) #(batch_size, n_node, dim_node)
+
+        #Normalize node sore (use norm from Z)
+        if self.args.no_node_score:
+            node_scores = node_scores.new_zeros(node_scores.size())
+        else:
+            _mask = (torch.arange(node_scores.size(1), device=node_scores.device) < adj_lengths.unsqueeze(1)).float() #0 means masked out #[batch_size, n_node]
+            node_scores = -node_scores
+            node_scores = node_scores - node_scores[:, 0:1, :] #[batch_size, n_node, 1]
+            node_scores = node_scores.squeeze(2) #[batch_size, n_node]
+            node_scores = node_scores * _mask
+            mean_norm  = (torch.abs(node_scores)).sum(dim=1) / adj_lengths  #[batch_size, ]
+            node_scores = node_scores / (mean_norm.unsqueeze(1) + 1e-05) #[batch_size, n_node]
+            node_scores = node_scores.unsqueeze(2) #[batch_size, n_node, 1]
+
+        t5gnn = self.t5
+        # Merged core
+        lm_outputs, gnn_output = t5gnn(input_ids, token_type_ids, attention_mask, output_mask, gnn_input, adj, node_type_ids, node_scores, special_nodes_mask, output_hidden_states=True)
+        # lm_outputs: ([bs, seq_len, sent_dim], [bs, sent_dim], ([bs, seq_len, sent_dim] for _ in range(7))) 7=N
+        # gnn_output: [bs, n_node, dim_node] (20, 200, 200)
+
+        # LM outputs
+        all_hidden_states = lm_outputs[-1] # ([bs, seq_len, sent_dim] for _ in range(7))
+        lm_hidden_states = all_hidden_states[self.layer_id] # [bs, seq_len, sent_dim]
+        sent_vecs = t5gnn.pooler(lm_hidden_states, attention_mask.to(torch.bool)) # [bs, sent_dim]
+
+        # sent_token_mask = output_mask.clone()
+        # sent_token_mask[:, 0] = 0
+
+        _bs, _seq_len, _ = lm_hidden_states.size()
+        # if self.args.mlm_task:
+        #     loss_fct = nn.CrossEntropyLoss()
+        #     if INHERIT_BERT:
+        #         prediction_scores, seq_relationship_score = self.cls(lm_hidden_states, sent_vecs)
+        #         masked_lm_loss = loss_fct(prediction_scores.view(_bs * _seq_len, -1), lm_labels.view(-1))
+        #         next_sentence_loss = 0. #loss_fct(seq_relationship_score.view(-1, 2), next_sentence_label.view(-1))
+        #         lm_loss = masked_lm_loss + next_sentence_loss
+        #     else:
+        #         prediction_scores = self.lm_head(lm_hidden_states)
+        #         lm_loss = loss_fct(prediction_scores.view(_bs * _seq_len, -1), lm_labels.view(-1))
+        # else:
+        #     lm_loss = 0.
+
+        if self.args.mlm_task:
+            lm_logits = self.lm_head(lm_hidden_states)
+            loss_fct = nn.CrossEntropyLoss(ignore_index=-100)
+            lm_labels = lm_labels.to(lm_logits.device)
+            lm_loss = loss_fct(lm_logits.view(-1, lm_logits.size(-1)), lm_labels.view(-1))
+
+        else:
+            lm_loss = 0.
+
+
+        # GNN outputs
+        Z_vecs = gnn_output[:,0]   #(batch_size, dim_node)
+
+        node_mask = torch.arange(node_type_ids.size(1), device=node_type_ids.device) >= adj_lengths.unsqueeze(1) #[bs, nodes] 1 means masked out
+        gnn_output = gnn_output * (~node_mask).float().unsqueeze(2)
+        node_mask = node_mask | (node_type_ids == 3) # pool over all KG nodes (excluding the context node)
+        node_mask[node_mask.all(1), 0] = 0  # a temporary solution to avoid zero node
+
+
+        # sent_node_mask = special_nodes_mask.clone()
+        # sent_node_mask[:, 0] = 0
+
+        if self.args.link_task:
+            pos_triples, neg_nodes = lp_data #pos_triples: [3, `total_n_triple`],  neg_nodes: [`total_n_triple`, n_neg]
+
+            pos_samples = pos_triples #[3, `total_n_triple`]
+
+            _n_neg = neg_nodes.size(1)
+            head_negative_sample = neg_nodes[:, :_n_neg//2]             #[`total_n_triple`, n_neg//2]
+            tail_negative_sample = neg_nodes[:, _n_neg//2:_n_neg//2*2]  #[`total_n_triple`, n_neg//2]
+
+            _bs, _, gnn_dim = gnn_output.size()
+            embs = gnn_output.view(-1, gnn_dim) #[`total_n_nodes`, gnn_dim]
+
+            if self.args.link_proj_headtail:
+                embs = self.linkpred_proj(embs)
+            if self.args.link_normalize_headtail == 1:
+                embs = embs / torch.norm(embs, p=2, dim=1, keepdim=True).detach()
+            elif self.args.link_normalize_headtail == 2:
+                embs = torch.tanh(embs)
+            elif self.args.link_normalize_headtail == 3:
+                embs = self.emb_LayerNorm(embs)
+
+            positive_score  = self.linkpred(embs, pos_samples) #[`total_n_triple`, 1]
+            head_neg_scores = self.linkpred(embs, (pos_samples, head_negative_sample), mode='head-batch')
+            tail_neg_scores = self.linkpred(embs, (pos_samples, tail_negative_sample), mode='tail-batch')
+            negative_score = torch.cat([head_neg_scores, tail_neg_scores], dim=-1) #[`total_n_triple`, total_n_neg]
+            scores = (positive_score, negative_score)
+
+            link_loss, pos_link_loss, neg_link_loss = self.linkpred.loss(scores)
+        else:
+            link_loss = pos_link_loss = neg_link_loss = 0.
+
+        # Concatenated pool
+        if self.args.end_task:
+            sent_vecs_for_pooler = sent_vecs
+            if self.k >= 0:
+                graph_vecs, pool_attn = self.pooler(sent_vecs_for_pooler, gnn_output, node_mask) #graph_vecs: [bs, node_dim]
+                concat_pool = torch.cat((graph_vecs, sent_vecs, Z_vecs), 1)
+            else:
+                concat_pool = sent_vecs
+            logits = self.fc(self.dropout_fc(concat_pool)) #[bs, 1]
+        else:
+            logits = None
+
+        return logits, lm_loss, (link_loss, pos_link_loss, neg_link_loss)
+
+    @classmethod
+    def from_pretrained(cls, pretrained_model_name_or_path, *model_args, **kwargs):
+        r"""Instantiate a pretrained pytorch model from a pre-trained model configuration.
+
+        The model is set in evaluation mode by default using ``model.eval()`` (Dropout modules are deactivated)
+        To train the model, you should first set it back in training mode with ``model.train()``
+
+        The warning ``Weights from XXX not initialized from pretrained model`` means that the weights of XXX do not come pre-trained with the rest of the model.
+        It is up to you to train those weights with a downstream fine-tuning task.
+
+        The warning ``Weights from XXX not used in YYY`` means that the layer XXX is not used by YYY, therefore those weights are discarded.
+
+        Parameters:
+            pretrained_model_name_or_path: either:
+              - a string with the `shortcut name` of a pre-trained model to load from cache or download, e.g.: ``bert-base-uncased``.
+              - a string with the `identifier name` of a pre-trained model that was user-uploaded to our S3, e.g.: ``dbmdz/bert-base-german-cased``.
+              - a path to a `directory` containing model weights saved using :func:`~transformers.PreTrainedModel.save_pretrained`, e.g.: ``./my_model_directory/``.
+              - a path or url to a `tensorflow index checkpoint file` (e.g. `./tf_model/model.ckpt.index`). In this case, ``from_tf`` should be set to True and a configuration object should be provided as ``config`` argument. This loading path is slower than converting the TensorFlow checkpoint in a PyTorch model using the provided conversion scripts and loading the PyTorch model afterwards.
+              - None if you are both providing the configuration and state dictionary (resp. with keyword arguments ``config`` and ``state_dict``)
+
+            model_args: (`optional`) Sequence of positional arguments:
+                All remaning positional arguments will be passed to the underlying model's ``__init__`` method
+
+            config: (`optional`) one of:
+                - an instance of a class derived from :class:`~transformers.PretrainedConfig`, or
+                - a string valid as input to :func:`~transformers.PretrainedConfig.from_pretrained()`
+
+                Configuration for the model to use instead of an automatically loaded configuation. Configuration can be automatically loaded when:
+                    - the model is a model provided by the library (loaded with the ``shortcut-name`` string of a pretrained model), or
+                    - the model was saved using :func:`~transformers.PreTrainedModel.save_pretrained` and is reloaded by suppling the save directory.
+                    - the model is loaded by suppling a local directory as ``pretrained_model_name_or_path`` and a configuration JSON file named `config.json` is found in the directory.
+
+            state_dict: (`optional`) dict:
+                an optional state dictionnary for the model to use instead of a state dictionary loaded from saved weights file.
+                This option can be used if you want to create a model from a pretrained configuration but load your own weights.
+                In this case though, you should check if using :func:`~transformers.PreTrainedModel.save_pretrained` and :func:`~transformers.PreTrainedModel.from_pretrained` is not a simpler option.
+
+            cache_dir: (`optional`) string:
+                Path to a directory in which a downloaded pre-trained model
+                configuration should be cached if the standard cache should not be used.
+
+            force_download: (`optional`) boolean, default False:
+                Force to (re-)download the model weights and configuration files and override the cached versions if they exists.
+
+            resume_download: (`optional`) boolean, default False:
+                Do not delete incompletely recieved file. Attempt to resume the download if such a file exists.
+
+            proxies: (`optional`) dict, default None:
+                A dictionary of proxy servers to use by protocol or endpoint, e.g.: {'http': 'foo.bar:3128', 'http://hostname': 'foo.bar:4012'}.
+                The proxies are used on each request.
+
+            output_loading_info: (`optional`) boolean:
+                Set to ``True`` to also return a dictionnary containing missing keys, unexpected keys and error messages.
+
+            kwargs: (`optional`) Remaining dictionary of keyword arguments:
+                Can be used to update the configuration object (after it being loaded) and initiate the model. (e.g. ``output_attention=True``). Behave differently depending on whether a `config` is provided or automatically loaded:
+
+                - If a configuration is provided with ``config``, ``**kwargs`` will be directly passed to the underlying model's ``__init__`` method (we assume all relevant updates to the configuration have already been done)
+                - If a configuration is not provided, ``kwargs`` will be first passed to the configuration class initialization function (:func:`~transformers.PretrainedConfig.from_pretrained`). Each key of ``kwargs`` that corresponds to a configuration attribute will be used to override said attribute with the supplied ``kwargs`` value. Remaining keys that do not correspond to any configuration attribute will be passed to the underlying model's ``__init__`` function.
+
+        Examples::
+
+            # For example purposes. Not runnable.
+            model = BertModel.from_pretrained('bert-base-uncased')    # Download model and configuration from S3 and cache.
+            model = BertModel.from_pretrained('./test/saved_model/')  # E.g. model was saved using `save_pretrained('./test/saved_model/')`
+            model = BertModel.from_pretrained('bert-base-uncased', output_attention=True)  # Update configuration during loading
+            assert model.config.output_attention == True
+            # Loading from a TF checkpoint file instead of a PyTorch model (slower)
+            config = BertConfig.from_json_file('./tf_model/my_tf_model_config.json')
+            model = BertModel.from_pretrained('./tf_model/my_tf_checkpoint.ckpt.index', from_tf=True, config=config)
+
+        """
+        config = kwargs.pop("config", None)
+        state_dict = kwargs.pop("state_dict", None)
+        cache_dir = kwargs.pop("cache_dir", None)
+        from_tf = kwargs.pop("from_tf", False)
+        force_download = kwargs.pop("force_download", False)
+        resume_download = kwargs.pop("resume_download", False)
+        proxies = kwargs.pop("proxies", None)
+        output_loading_info = kwargs.pop("output_loading_info", False)
+        local_files_only = kwargs.pop("local_files_only", False)
+        # use_cdn = kwargs.pop("use_cdn", True)
+
+        k = kwargs["k"]
+
+        # Load config if we don't provide a configuration
+        if not isinstance(config, PretrainedConfig):
+            config_path = config if config is not None else pretrained_model_name_or_path
+            config, model_kwargs = cls.config_class.from_pretrained(
+                config_path,
+                *model_args,
+                cache_dir=cache_dir,
+                return_unused_kwargs=True,
+                force_download=force_download,
+                resume_download=resume_download,
+                proxies=proxies,
+                local_files_only=local_files_only,
+                **kwargs,
+            )
+        else:
+            model_kwargs = kwargs
+
+        # Load model
+        if pretrained_model_name_or_path is not None:
+            if os.path.isdir(pretrained_model_name_or_path):
+                if from_tf and os.path.isfile(os.path.join(pretrained_model_name_or_path, TF_WEIGHTS_NAME + ".index")):
+                    # Load from a TF 1.0 checkpoint
+                    archive_file = os.path.join(pretrained_model_name_or_path, TF_WEIGHTS_NAME + ".index")
+                elif from_tf and os.path.isfile(os.path.join(pretrained_model_name_or_path, TF2_WEIGHTS_NAME)):
+                    # Load from a TF 2.0 checkpoint
+                    archive_file = os.path.join(pretrained_model_name_or_path, TF2_WEIGHTS_NAME)
+                elif os.path.isfile(os.path.join(pretrained_model_name_or_path, WEIGHTS_NAME)):
+                    # Load from a PyTorch checkpoint
+                    archive_file = os.path.join(pretrained_model_name_or_path, WEIGHTS_NAME)
+                else:
+                    raise EnvironmentError(
+                        "Error no file named {} found in directory {} or `from_tf` set to False".format(
+                            [WEIGHTS_NAME, TF2_WEIGHTS_NAME, TF_WEIGHTS_NAME + ".index"],
+                            pretrained_model_name_or_path,
+                        )
+                    )
+            elif os.path.isfile(pretrained_model_name_or_path) or is_remote_url(pretrained_model_name_or_path):
+                archive_file = pretrained_model_name_or_path
+            elif os.path.isfile(pretrained_model_name_or_path + ".index"):
+                assert (
+                    from_tf
+                ), "We found a TensorFlow checkpoint at {}, please set from_tf to True to load from this checkpoint".format(
+                    pretrained_model_name_or_path + ".index"
+                )
+                archive_file = pretrained_model_name_or_path + ".index"
+            else:
+                archive_file = hf_bucket_url(
+                    pretrained_model_name_or_path,
+                    filename=(TF2_WEIGHTS_NAME if from_tf else WEIGHTS_NAME),
+                    # use_cdn=use_cdn,
+                )
+
+            try:
+                # Load from URL or cache if already cached
+                resolved_archive_file = cached_path(
+                    archive_file,
+                    cache_dir=cache_dir,
+                    force_download=force_download,
+                    proxies=proxies,
+                    resume_download=resume_download,
+                    local_files_only=local_files_only,
+                )
+                if resolved_archive_file is None:
+                    raise EnvironmentError
+            except EnvironmentError:
+                msg = (
+                    f"Can't load weights for '{pretrained_model_name_or_path}'. Make sure that:\n\n"
+                    f"- '{pretrained_model_name_or_path}' is a correct model identifier listed on 'https://huggingface.co/models'\n\n"
+                    f"- or '{pretrained_model_name_or_path}' is the correct path to a directory containing a file named one of {WEIGHTS_NAME}, {TF2_WEIGHTS_NAME}, {TF_WEIGHTS_NAME}.\n\n"
+                )
+                raise EnvironmentError(msg)
+
+            if resolved_archive_file == archive_file:
+                logger.info("loading weights file {}".format(archive_file))
+            else:
+                logger.info("loading weights file {} from cache at {}".format(archive_file, resolved_archive_file))
+        else:
+            resolved_archive_file = None
+
+        # Instantiate model.
+        model = cls(config, *model_args, **model_kwargs)
+
+        if state_dict is None and not from_tf:
+            try:
+                state_dict = torch.load(resolved_archive_file, map_location="cpu")
+            except Exception:
+                raise OSError(
+                    "Unable to load weights from pytorch checkpoint file. "
+                    "If you tried to load a PyTorch model from a TF 2.0 checkpoint, please set from_tf=True. "
+                )
+
+        missing_keys = []
+        unexpected_keys = []
+        error_msgs = []
+
+        if from_tf:
+            if resolved_archive_file.endswith(".index"):
+                # Load from a TensorFlow 1.X checkpoint - provided by original authors
+                model = cls.load_tf_weights(model, config, resolved_archive_file[:-6])  # Remove the '.index'
+            else:
+                # Load from our TensorFlow 2.0 checkpoints
+                try:
+                    from transformers import load_tf2_checkpoint_in_pytorch_model
+
+                    model = load_tf2_checkpoint_in_pytorch_model(model, resolved_archive_file, allow_missing_keys=True)
+                except ImportError:
+                    logger.error(
+                        "Loading a TensorFlow model in PyTorch, requires both PyTorch and TensorFlow to be installed. Please see "
+                        "https://pytorch.org/ and https://www.tensorflow.org/install/ for installation instructions."
+                    )
+                    raise
+        else:
+            # Convert old format to new format if needed from a PyTorch state_dict
+            old_keys = []
+            new_keys = []
+            for key in state_dict.keys():
+                new_key = None
+                if "gamma" in key:
+                    new_key = key.replace("gamma", "weight")
+                if "beta" in key:
+                    new_key = key.replace("beta", "bias")
+                if new_key:
+                    old_keys.append(key)
+                    new_keys.append(new_key)
+            for old_key, new_key in zip(old_keys, new_keys):
+                state_dict[new_key] = state_dict.pop(old_key)
+
+            # copy state_dict so _load_from_state_dict can modify it
+            metadata = getattr(state_dict, "_metadata", None)
+            state_dict = state_dict.copy()
+            if metadata is not None:
+                state_dict._metadata = metadata
+
+            all_keys = list(state_dict.keys())
+
+            # PyTorch's `_load_from_state_dict` does not copy parameters in a module's descendants
+            # so we need to apply the function recursively.
+            def load(module: nn.Module, prefix=""):
+                local_metadata = {} if metadata is None else metadata.get(prefix[:-1], {})
+                module._load_from_state_dict(
+                    state_dict, prefix, local_metadata, True, missing_keys, unexpected_keys, error_msgs,
+                )
+                for name, child in module._modules.items():
+                    if child is not None:
+                        load(child, prefix + name + ".")
+
+            # Make sure we are able to load base models as well as derived models (with heads)
+            start_prefix = ""
+            model_to_load = model
+            has_prefix_module = any(s.startswith(cls.base_model_prefix) for s in state_dict.keys())
+            if not hasattr(model, cls.base_model_prefix) and has_prefix_module:
+                start_prefix = cls.base_model_prefix + "."
+            if hasattr(model, cls.base_model_prefix) and not has_prefix_module:
+                model_to_load = getattr(model, cls.base_model_prefix)
+
+            load(model_to_load, prefix=start_prefix)
+
+            if model.__class__.__name__ != model_to_load.__class__.__name__:
+                base_model_state_dict = model_to_load.state_dict().keys()
+                head_model_state_dict_without_base_prefix = [
+                    key.split(cls.base_model_prefix + ".")[-1] for key in model.state_dict().keys()
+                ]
+
+                missing_keys.extend(head_model_state_dict_without_base_prefix - base_model_state_dict)
+
+            if len(unexpected_keys) > 0:
+                logger.warning(
+                    f"Some weights of the model checkpoint at {pretrained_model_name_or_path} were not used when "
+                    f"initializing {model.__class__.__name__}: {unexpected_keys}\n"
+                    f"- This IS expected if you are initializing {model.__class__.__name__} from the checkpoint of a model trained on another task "
+                    f"or with another architecture (e.g. initializing a BertForSequenceClassification model from a BertForPretraining model).\n"
+                    f"- This IS NOT expected if you are initializing {model.__class__.__name__} from the checkpoint of a model that you expect "
+                    f"to be exactly identical (initializing a BertForSequenceClassification model from a BertForSequenceClassification model)."
+                )
+            else:
+                print(f"All model checkpoint weights were used when initializing {model.__class__.__name__}.\n")
+            if len(missing_keys) > 0:
+                logger.warning(
+                    f"Some weights of {model.__class__.__name__} were not initialized from the model checkpoint at {pretrained_model_name_or_path} "
+                    f"and are newly initialized: {missing_keys}\n"
+                    f"You should probably TRAIN this model on a down-stream task to be able to use it for predictions and inference."
+                )
+            else:
+                print(
+                    f"All the weights of {model.__class__.__name__} were initialized from the model checkpoint at {pretrained_model_name_or_path}.\n"
+                    f"If your task is similar to the task the model of the ckeckpoint was trained on, "
+                    f"you can already use {model.__class__.__name__} for predictions without further training."
+                )
+            if len(error_msgs) > 0:
+                raise RuntimeError(
+                    "Error(s) in loading state_dict for {}:\n\t{}".format(
+                        model.__class__.__name__, "\n\t".join(error_msgs)
+                    )
+                )
+        model.tie_weights()  # make sure token embedding weights are still tied if needed
+
+        # Set model in evaluation mode to deactivate DropOut modules by default
+        model.eval()
+
+        if output_loading_info:
+            loading_info = {
+                "missing_keys": missing_keys,
+                "unexpected_keys": unexpected_keys,
+                "error_msgs": error_msgs,
+                "all_keys": all_keys,
+            }
+            return model, loading_info
+
+        if hasattr(config, "xla_device") and config.xla_device:
+            import torch_xla.core.xla_model as xm
+
+            model = xm.send_cpu_data_to_device(model, xm.xla_device())
+            model.to(xm.xla_device())
+
+        return model
+
+    def get_fake_inputs(self, device="cuda:0"):
+        bs = 20
+        seq_len = 100
+        input_ids = torch.zeros([bs, seq_len], dtype=torch.long).to(device)
+        token_type_ids = torch.zeros([bs, seq_len], dtype=torch.long).to(device)
+        attention_mask = torch.ones([bs, seq_len]).to(device)
+
+        n_node = 200
+        concept_ids = torch.arange(end=n_node).repeat(bs, 1).to(device)
+        adj_lengths = torch.zeros([bs], dtype=torch.long).fill_(10).to(device)
+
+        n_edges = 3
+        edge_index = torch.tensor([[1, 2, 3], [4, 5, 6]]).to(device)
+        edge_type = torch.zeros(n_edges, dtype=torch.long).fill_(2).to(device)
+        adj = (edge_index, edge_type)
+
+        node_type = torch.zeros([bs, n_node], dtype=torch.long).to(device)
+        node_type[:, 0] = 3
+        node_score = torch.zeros([bs, n_node, 1]).to(device)
+        node_score[:, 1] = 180
+
+        # if link_task == False:
+        lp_data = []
+        return (None, None, input_ids, attention_mask, token_type_ids, None), concept_ids, node_type, node_score, adj_lengths, [], adj, lp_data
+
+    # def check_outputs(self, logits, pool_attn):
+    #     bs = 20
+    #     assert logits.size() == (bs, 1)
+    #     n_edges = 3
+    #
+    def check_outputs(self, logits):
+        bs = 20
+        assert logits.size() == (bs, 1)
+        n_edges = 3
+
+def test_LMGNN(device):
+        cp_emb = torch.load("../data/cpnet/cp_emb.pt")
+        test_args = Args()
+        # model = LMGNN(pretrained_concept_emb=cp_emb).to(device)
+        model, loading_info = LMGNN.from_pretrained("t5-small", args=test_args, pretrained_concept_emb=cp_emb,
+                                                    output_loading_info=True, model_name="t5-small", k=5)
+        model.to(device)
+        # print(model)
+        # print(loading_info)
+        inputs = model.get_fake_inputs(device)
+        outputs = model(*inputs)
+        model.check_outputs(outputs[0])
+
+
+
+
 
 class TextKGMessagePassing(ModelClass):
 
@@ -684,4 +1265,6 @@ if __name__ == "__main__":
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
     # test_T5GAT(device)
-    test_TextKGMessagePassing(device)
+    # test_TextKGMessagePassing(device)
+
+    test_LMGNN(device)
