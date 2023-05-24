@@ -1099,12 +1099,24 @@ class T5GAT(T5EncoderModel):
 
             self.sent_dim = config.hidden_size
             self.sep_ie_layers = sep_ie_layers
+            ## When sep_ie_layers is True, the code will create a list of MLP objects self.ie_layers containing k MLP objects,
+            # one for each GNN layer. If sep_ie_layers is False, the code will create a single MLP object self.ie_layer,
+            ## and all GNN layers will use this one information exchange layer.
+
+
+            ##In the forward propagation forward method of the model,
+            # depending on the value of sep_ie_layers,
+            # the corresponding information exchange layer is used for information exchange.
+            # If sep_ie_layers is True, then self.ie_layers[gnn_layer_index] of the corresponding layer is used for information exchange;
+            # if it is False, then self.ie_layer is used for information exchange.
             if sep_ie_layers:
                 self.ie_layers = nn.ModuleList([layers.MLP(self.sent_dim + concept_dim, ie_dim, self.sent_dim + concept_dim, ie_layer_num, p_fc) for _ in range(k)])
             else:
                 self.ie_layer = layers.MLP(self.sent_dim + concept_dim, ie_dim, self.sent_dim + concept_dim, ie_layer_num, p_fc)
             if self.args.residual_ie == 2:
                 self.ie_LayerNorm = nn.LayerNorm(self.sent_dim + concept_dim)
+
+
 
     def forward(self, hidden_states, attention_mask, special_tokens_mask, head_mask, _X, edge_index, edge_type, _node_type,
                 _node_feature_extra, special_nodes_mask, output_attentions=False, output_hidden_states=True):
@@ -1119,6 +1131,9 @@ class T5GAT(T5EncoderModel):
         _node_type: [bs * n_nodes]
         _node_feature_extra: [bs * n_nodes, node_dim]
         """
+        self.output_attentions = output_attentions
+        self.output_hidden_states = output_hidden_states
+
         bs = hidden_states.size(0)
         all_hidden_states = ()
         all_attentions = ()
@@ -1130,7 +1145,10 @@ class T5GAT(T5EncoderModel):
                 all_hidden_states = all_hidden_states + (hidden_states,)
 
             layer_outputs = layer_module(hidden_states, attention_mask, head_mask[i])
+            # layer_outputs = (hidden-states,  attentions)
             hidden_states = layer_outputs[0]
+            # hidden_states = [bs, seq_len, sent_dim] eg: [bs, 100, 512]
+            # attentions = [bs, n_heads, seq_len, seq_len] eg: [bs, 8, 100, 100]
 
             if output_attentions:
                 all_attentions = all_attentions + (layer_outputs[1],)
@@ -1141,6 +1159,7 @@ class T5GAT(T5EncoderModel):
                 # GNN
                 gnn_layer_index = i - self.num_hidden_layers + self.k
                 _X = self.gnn_layers[gnn_layer_index](_X, edge_index, edge_type, _node_type, _node_feature_extra)
+                # _X = [bs*num_node,  d_node] eg [4000,200]
                 _X = self.activation(_X)
                 _X = F.dropout(_X, self.dropout_rate, training=self.training)
 
@@ -1150,7 +1169,7 @@ class T5GAT(T5EncoderModel):
                     X = _X.view(bs, -1, _X.size(1))  # [bs, max_num_nodes, node_dim]
                     context_node_lm_feats = hidden_states[:, 0, :]  # [bs, sent_dim]
                     context_node_gnn_feats = X[:, 0, :]  # [bs, node_dim]
-                    context_node_feats = torch.cat([context_node_lm_feats, context_node_gnn_feats], dim=1)
+                    context_node_feats = torch.cat([context_node_lm_feats, context_node_gnn_feats], dim=1) # [bs, sent_dim + node_dim]
                     if self.sep_ie_layers:
                         _context_node_feats = self.ie_layers[gnn_layer_index](context_node_feats)
                     else:
@@ -1177,42 +1196,25 @@ class T5GAT(T5EncoderModel):
             outputs = outputs + (all_hidden_states,)
         if output_attentions:
             outputs = outputs + (all_attentions,)
-        return outputs, _X # last-layer hidden state, (all hidden states), (all attentions)
 
-    # def get_fake_inputs(self, device="cuda:0"):
-    #     bs = 20
-    #     seq_len = 100
-    #     input_ids = torch.zeros([bs, seq_len], dtype=torch.long).to(device)
-    #     attention_mask = torch.ones([bs, seq_len], dtype=torch.long).to(device)
-    #     head_mask = [None] * self.num_hidden_layers
-    #
-    #     n_node = 200
-    #     _X = torch.zeros([bs * n_node, self.concept_dim]).to(device)
-    #     n_edges = 3
-    #     edge_index = torch.tensor([[1, 2, 3], [4, 5, 6]]).to(device)
-    #     edge_type = torch.zeros(n_edges, dtype=torch.long).fill_(2).to(device)
-    #     _node_type = torch.zeros([bs, n_node], dtype=torch.long).to(device)
-    #     _node_type[:, 0] = 3
-    #     _node_type = _node_type.view(-1)
-    #     _node_feature_extra = torch.zeros([bs * n_node, self.concept_dim]).to(device)
-    #     special_nodes_mask = torch.zeros([bs, n_node], dtype=torch.long).to(device)
-    #     special_tokens_mask = torch.zeros([bs, seq_len], dtype=torch.long).to(device)
-    #     return input_ids, attention_mask, special_tokens_mask  , head_mask, _X, edge_index, edge_type, _node_type, _node_feature_extra,special_nodes_mask
-    #
-    #
-    # def check_outputs(self, outputs, _X):
-    #     bs = 20
-    #     seq_len = 100
-    #     assert outputs[0].size() == (bs, seq_len, self.sent_dim)
-    #     n_node = 200
-    #     assert _X.size() == (bs * n_node, self.concept_dim)
+        # oututs:
+        #   last-layer hidden state [bs,seq_len,sent_dim ] ,
+        #   (all hidden states) num_lm_layer* [bs,seq_len, send_dim ]
+        #   (all attentions): num_lm_layer-1 * [bs, n_heads, seq_len, seq_len]
+        # _X: [bs * n_node, d_node]
+        return outputs, _X
+
+
     def get_fake_inputs(self, device="cuda:0"):
         bs = 20
+
+        # LM input
         seq_len = 100
         hidden_states = torch.zeros([bs, seq_len, self.sent_dim]).to(device)
         attention_mask = torch.zeros([bs, 1, 1, seq_len]).to(device)
         head_mask = [None] * self.num_hidden_layers
 
+        # gnn input
         n_node = 200
         _X = torch.zeros([bs * n_node, self.concept_dim]).to(device)
         n_edges = 3
@@ -1222,7 +1224,16 @@ class T5GAT(T5EncoderModel):
         _node_type[:, 0] = 3
         _node_type = _node_type.view(-1)
         _node_feature_extra = torch.zeros([bs * n_node, self.concept_dim]).to(device)
-        return hidden_states, attention_mask, [], head_mask, _X, edge_index, edge_type, _node_type, _node_feature_extra, []
+
+        # these are not used
+        special_nodes_mask = torch.zeros([bs, n_node], dtype=torch.long).to(device)
+        special_tokens_mask = torch.zeros([bs, seq_len], dtype=torch.long).to(device)
+
+        ## test args
+        output_attentions = True
+        output_hidden_states = True
+        return hidden_states, attention_mask, special_tokens_mask, head_mask, _X, \
+            edge_index, edge_type, _node_type, _node_feature_extra, special_nodes_mask, output_attentions, output_hidden_states
 
     def check_outputs(self, outputs, _X):
         bs = 20
@@ -1230,6 +1241,15 @@ class T5GAT(T5EncoderModel):
         assert outputs[0].size() == (bs, seq_len, self.sent_dim)
         n_node = 200
         assert _X.size() == (bs * n_node, self.concept_dim)
+
+        if self.output_hidden_states:
+            assert len(outputs[1]) == self.num_hidden_layers + 1
+            for i in range(self.num_hidden_layers):
+                assert outputs[1][i].size() == (bs, seq_len, self.sent_dim)
+        if self.output_attentions:
+            assert len(outputs[2]) == self.num_hidden_layers
+            for i in range(self.num_hidden_layers ):
+                assert outputs[2][i].size() == (bs, self.encoder.config.num_attention_heads, seq_len, seq_len)
 
 
 def test_T5GAT(device):
@@ -1243,8 +1263,9 @@ def test_T5GAT(device):
     class Args:
         def __init__(self):
             self.residual_ie = 2
-            self.fp16 = False
-            self.update_ie = False
+            self.fp16 = True
+            self.upcast = True
+            self.update_ie = True
 
     test_args = Args()
     model = T5GAT(config, args=test_args, sep_ie_layers=True).to(device)
@@ -1265,6 +1286,6 @@ if __name__ == "__main__":
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
     # test_T5GAT(device)
-    # test_TextKGMessagePassing(device)
+    test_TextKGMessagePassing(device)
 
-    test_LMGNN(device)
+    # test_LMGNN(device)
