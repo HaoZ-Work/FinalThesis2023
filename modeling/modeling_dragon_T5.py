@@ -26,8 +26,8 @@ logger = logging.getLogger(__name__)
 class Args:
     def __init__(self):
         self.residual_ie = 2
-        self.fp16 = False
-        self.upcast = False
+        self.fp16 = True
+        self.upcast = True
 
         # For LMGNN class
         self.mlm_task = True
@@ -616,8 +616,6 @@ def test_LMGNN(device):
 
 
 
-
-
 class TextKGMessagePassing(ModelClass):
 
     def __init__(self, config, args={}, k=5, n_ntype=4, n_etype=38, dropout=0.2, concept_dim=200, ie_dim=200, p_fc=0.2, info_exchange=True, ie_layer_num=1, sep_ie_layers=False):
@@ -629,6 +627,7 @@ class TextKGMessagePassing(ModelClass):
         self.hidden_size = concept_dim
         self.emb_node_type = nn.Linear(self.n_ntype, concept_dim // 2)
 
+        # different way to encode the score of each node
         self.basis_f = 'sin' #['id', 'linact', 'sin', 'none']
         if self.basis_f in ['id']:
             self.emb_score = nn.Linear(1, concept_dim // 2)
@@ -638,8 +637,10 @@ class TextKGMessagePassing(ModelClass):
         elif self.basis_f in ['sin']:
             self.emb_score = nn.Linear(concept_dim // 2, concept_dim // 2)
 
+        # how many greaseLM layers to use, 5 as default
         self.k = k
 
+        # two linear layers node features from the previous layer and new node features produced by the current layer
         self.Vh = nn.Linear(concept_dim, concept_dim)
         self.Vx = nn.Linear(concept_dim, concept_dim)
 
@@ -648,6 +649,8 @@ class TextKGMessagePassing(ModelClass):
         self.dropout_rate = dropout
 
         self.encoder = T5GAT(config, args, k=k, n_ntype=n_ntype, n_etype=n_etype, hidden_size=concept_dim, dropout=dropout, concept_dim=concept_dim, ie_dim=ie_dim, p_fc=p_fc, info_exchange=info_exchange, ie_layer_num=ie_layer_num, sep_ie_layers=sep_ie_layers)
+
+        # TODO: check if this is correct,which kind of pooling to use?
         self.pooler = layers.MeanPoolLayer()
 
         self.sent_dim = config.hidden_size
@@ -700,6 +703,8 @@ class TextKGMessagePassing(ModelClass):
 
         #Embed type
         T = modeling_gnn.make_one_hot(node_type.view(-1).contiguous(), self.n_ntype).view(_batch_size, _n_nodes, self.n_ntype)
+        # T [20, 100, 4] [bs, n_node, n_ntype]
+
         node_type_emb = self.activation(self.emb_node_type(T)) #[batch_size, n_node, dim/2]
 
         #Embed score
@@ -714,19 +719,22 @@ class TextKGMessagePassing(ModelClass):
         elif self.basis_f == 'linact':
             B = self.activation(self.B_lin(node_score)) #[batch_size, n_node, dim/2]
             node_score_emb = self.activation(self.emb_score(B)) #[batch_size, n_node, dim/2]
-
+        # node_score_emb : [20, 200, 100] [bs, n_node, dim/2]
 
         X = H
         edge_index, edge_type = A #edge_index: [2, total_E]   edge_type: [total_E, ]  where total_E is for the batched graph
         _X = X.view(-1, X.size(2)).contiguous() #[`total_n_nodes`, d_node] where `total_n_nodes` = b_size * n_node
+        # _X [bs*num_node, d_node]
         _node_type = node_type.view(-1).contiguous() #[`total_n_nodes`, ]
+        # _node_type [bs*num_node, ]
         _node_feature_extra = torch.cat([node_type_emb, node_score_emb], dim=2).view(_node_type.size(0), -1).contiguous() #[`total_n_nodes`, dim]
+        # _node_feature_extra [bs*num_node, dim]
 
         # Merged core
         encoder_outputs, _X = self.encoder(embedding_output,
                                        extended_attention_mask, special_tokens_mask, head_mask, _X, edge_index, edge_type, _node_type, _node_feature_extra, special_nodes_mask, output_hidden_states=output_hidden_states)
 
-        # LM outputs
+        # LM outputs (hiddenn states)
         sequence_output = encoder_outputs[0]
 
         ## TODO: check if this is correct,should we pooler layer or which pooler should we use with T5
@@ -734,12 +742,18 @@ class TextKGMessagePassing(ModelClass):
         # print("pooled_output", pooled_output.size()) #[20, 512] [bs, dim]
 
         outputs = (sequence_output, pooled_output,) + encoder_outputs[1:]  # add hidden_states and attentions if they are here
+        # outputs
+        # sequence_output torch.Size([20, 100, 512]) [bs, seq_len, dim]
+        # pooled_output torch.Size([20, 512]) [bs, dim]
+        # all_hidden_states (num_hidden_layers + 1)* torch.Size([20, 100, 512]) 7*[bs, seq_len, dim]
 
         # GNN outputs
         X = _X.view(node_type.size(0), node_type.size(1), -1) #[batch_size, n_node, dim]
+        # X is the node new embeddings in this layer
 
         output = self.activation(self.Vh(H) + self.Vx(X))
         output = self.dropout(output)
+        # output [20, 200, 200] [bs, n_node, dim]
 
         return outputs, output
 
@@ -1045,12 +1059,14 @@ class TextKGMessagePassing(ModelClass):
         return model
 
     def get_fake_inputs(self, device="cuda:0"):
+        # LM inputs
         bs = 20
         seq_len = 100
         input_ids = torch.zeros([bs, seq_len], dtype=torch.long).to(device)
         token_type_ids = torch.zeros([bs, seq_len], dtype=torch.long).to(device)
         attention_mask = torch.ones([bs, seq_len]).to(device)
 
+        # GNN inputs
         n_node = 200
         H = torch.zeros([bs, n_node, self.hidden_size]).to(device)
         n_edges = 3
@@ -1062,12 +1078,25 @@ class TextKGMessagePassing(ModelClass):
         node_type[:, 0] = 3
         node_score = torch.zeros([bs, n_node, 1]).to(device)
         node_score[:, 1] = 180
-        return input_ids, token_type_ids, attention_mask, [], H, A,  node_type, node_score, []
+        # these are not used
+        special_nodes_mask = torch.zeros([bs, n_node], dtype=torch.long).to(device)
+        special_tokens_mask = torch.zeros([bs, seq_len], dtype=torch.long).to(device)
 
-    def check_outputs(self, outputs, gnn_output):
+
+        return input_ids, token_type_ids, attention_mask, special_nodes_mask, H, A,  node_type, node_score, \
+            special_tokens_mask,
+
+    def check_outputs(self, lm_outputs, gnn_output):
         bs = 20
         seq_len = 100
-        assert outputs[0].size() == (bs, seq_len, self.sent_dim)
+        # LM outputs test
+        assert lm_outputs[0].size() == (bs, seq_len, self.sent_dim)
+        assert lm_outputs[1].size() == (bs, self.sent_dim)
+        assert len(lm_outputs[2]) == self.encoder.num_hidden_layers + 1
+        for  hidden_states in lm_outputs[2]:
+            assert hidden_states.size() == (bs, seq_len, self.sent_dim)
+
+        # GNN outputs test
         n_node = 200
         assert gnn_output.size() == (bs, n_node, self.hidden_size)
 
@@ -1077,8 +1106,8 @@ def test_TextKGMessagePassing(device):
     model = TextKGMessagePassing.from_pretrained("t5-small", output_hidden_states=True, args=test_args, k=5).to(device)
     #print(model)
     inputs = model.get_fake_inputs(device)
-    outputs = model(*inputs)
-    model.check_outputs(*outputs)
+    lm_outputs, gnn_output  = model(*inputs)
+    model.check_outputs(lm_outputs, gnn_output)
 
 class T5GAT(T5EncoderModel):
 
