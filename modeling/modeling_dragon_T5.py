@@ -31,7 +31,17 @@ class Args:
 
         # For LMGNN class
         self.mlm_task = True
-        self.link_task = False
+        self.link_task = True
+        if self.link_task:
+            self.link_decoder = "DistMult"
+            self.link_negative_adversarial_sampling = True
+            self.link_negative_adversarial_sampling_temperature = 1.0
+            self.link_regularizer_weight = 0.0
+            self.link_proj_headtail = True
+            self.link_normalize_headtail = 3
+            self.scaled_distmult = True
+            # self.no_node_score = True
+            # self.end_task = True
         self.no_node_score = True
         self.end_task = True
 
@@ -44,7 +54,147 @@ except:
 
 
 
+class DRAGON(nn.Module):
 
+    def __init__(self, args={}, model_name="t5-small", k=5, n_ntype=4, n_etype=38,
+                 n_concept=799273, concept_dim=200, concept_in_dim=1024, n_attention_head=2,
+                 fc_dim=200, n_fc_layer=0, p_emb=0.2, p_gnn=0.2, p_fc=0.2,
+                 pretrained_concept_emb=None, freeze_ent_emb=True,
+                 init_range=0.02, ie_dim=200, info_exchange=True, ie_layer_num=1, sep_ie_layers=False, layer_id=-1):
+        super().__init__()
+
+        self.n_ntype = n_ntype
+        self.n_etype = n_etype
+
+        self.lmgnn, self.loading_info = LMGNN.from_pretrained(model_name, output_hidden_states=True, output_loading_info=True, args=args, model_name=model_name, k=k, n_ntype=n_ntype, n_etype=n_etype, n_concept=n_concept, concept_dim=concept_dim, concept_in_dim=concept_in_dim, n_attention_head=n_attention_head, fc_dim=fc_dim, n_fc_layer=n_fc_layer, p_emb=p_emb, p_gnn=p_gnn, p_fc=p_fc, pretrained_concept_emb=pretrained_concept_emb, freeze_ent_emb=freeze_ent_emb, init_range=init_range, ie_dim=ie_dim, info_exchange=info_exchange, ie_layer_num=ie_layer_num,  sep_ie_layers=sep_ie_layers, layer_id=layer_id)
+
+    def batch_graph(self, edge_index_init, edge_type_init, pos_triples_init, neg_nodes_init, n_nodes):
+        """
+        edge_index_init:  list of (n_examples, ). each entry is torch.tensor(2, E?)    ==> [2, total_E]
+        edge_type_init:   list of (n_examples, ). each entry is torch.tensor(E?, )     ==> [total_E, ]
+        pos_triples_init: list of (n_examples, ). each entry is [h,r,t] where h/r/t: torch.tensor(n_triple?, ) ==> [3, `total_n_triple`]
+        neg_nodes_init:   list of (n_examples, ). each entry is torch.tensor(n_triple?, n_neg) ==> [`total_n_triple`, n_neg]
+        """
+        n_examples = len(edge_index_init)
+        edge_index = [edge_index_init[_i_] + _i_ * n_nodes for _i_ in range(n_examples)]
+        edge_index = torch.cat(edge_index, dim=1) #[2, total_E]
+        edge_type = torch.cat(edge_type_init, dim=0) #[total_E, ]
+
+        pos_triples = [[], [], []]
+        for _i_ in range(n_examples):
+            h = pos_triples_init[_i_][0] + _i_ * n_nodes #tensor[n_triple?,]
+            r = pos_triples_init[_i_][1]                 #tensor[n_triple?,]
+            t = pos_triples_init[_i_][2] + _i_ * n_nodes #tensor[n_triple?,]
+            pos_triples[0].append(h)
+            pos_triples[1].append(r)
+            pos_triples[2].append(t)
+        pos_triples = torch.stack([torch.cat(item) for item in pos_triples]) #[3, `total_n_triple`] where `total_n_triple` is sum of n_triple within batch
+        assert pos_triples.size(0) == 3
+
+        neg_nodes = [neg_nodes_init[_i_] + _i_ * n_nodes for _i_ in range(n_examples)]
+        neg_nodes = torch.cat(neg_nodes) #[`total_n_triple`, n_neg]
+        assert neg_nodes.dim() == 2
+        assert pos_triples.size(1) == neg_nodes.size(0)
+        return edge_index, edge_type, pos_triples, neg_nodes
+
+    def forward(self, *inputs, cache_output=False, detail=False):
+        """
+        inputs_ids: (batch_size, num_choice, seq_len)    -> (batch_size * num_choice, seq_len)
+        concept_ids: (batch_size, num_choice, n_node)  -> (batch_size * num_choice, n_node)
+        node_type_ids: (batch_size, num_choice, n_node) -> (batch_size * num_choice, n_node)
+        node_scores: [bs, nc, n_node, 1]
+        adj_lengths: means the "actual" number of nodes (excluding padding)(batch_size, num_choice)          -> (batch_size * num_choice, )
+        adj -> edge_index, edge_type
+            edge_index: list of (batch_size, num_choice) -> list of (batch_size * num_choice, ); each entry is torch.tensor(2, E(variable))
+                                                         -> (2, total E)
+            edge_type:  list of (batch_size, num_choice) -> list of (batch_size * num_choice, ); each entry is torch.tensor(E(variable), )
+                                                         -> (total E, )
+
+        returns:
+        logits: [bs, nc]
+        """
+        bs, nc = inputs[0].size(0), inputs[0].size(1)
+
+        #Here, merge the batch dimension and the num_choice dimension
+        assert len(inputs) == 6 + 5 + 2 + 2  #6 lm_data, 5 gnn_data, (edge_index, edge_type), (pos_triples, neg_nodes)
+        edge_index_orig, edge_type_orig = inputs[-2:]
+        _inputs = [x.reshape(x.size(0) * x.size(1), *x.size()[2:]) for x in inputs[:6]] + [x.reshape(x.size(0) * x.size(1), *x.size()[2:]) for x in inputs[6:11]] + [sum(x,[]) for x in inputs[11:15]]
+
+        *lm_inputs, concept_ids, node_type_ids, node_scores, adj_lengths, special_nodes_mask, edge_index, edge_type, pos_triples, neg_nodes = _inputs
+        # node_scores = torch.zeros_like(node_scores) #handled in LMGNN forward
+        edge_index, edge_type, pos_triples, neg_nodes = self.batch_graph(edge_index, edge_type, pos_triples, neg_nodes, concept_ids.size(1))
+        device = node_type_ids.device
+        adj     = (edge_index.to(device), edge_type.to(device))
+        lp_data = (pos_triples.to(device), neg_nodes.to(device))
+
+        logits, lm_loss, link_losses = self.lmgnn(lm_inputs, concept_ids,
+                                    node_type_ids, node_scores, adj_lengths, special_nodes_mask, adj, lp_data,
+                                    emb_data=None, cache_output=cache_output)
+        # logits: [bs * nc], lm_loss: scalar, link_losses: (scalar, scalar, scalar)
+        if logits is not None:
+            logits = logits.view(bs, nc)
+        lm_loss = lm_loss * bs
+        link_losses = [item * bs for item in link_losses]
+        if not detail:
+            return logits, lm_loss, link_losses
+        else:
+            return logits, lm_loss, link_losses, concept_ids.view(bs, nc, -1), node_type_ids.view(bs, nc, -1), edge_index_orig, edge_type_orig
+            # edge_index_orig: list of (batch_size, num_choice). each entry is torch.tensor(2, E)
+            # edge_type_orig: list of (batch_size, num_choice). each entry is torch.tensor(E, )
+
+    def get_fake_inputs(self, device="cuda:0"):
+        bs = 2
+        nc = 5
+        seq_len = 100
+        lm_inputs = torch.zeros([bs, nc, seq_len], dtype=torch.long).to(device)
+        lm_labels = torch.zeros([bs, nc, seq_len], dtype=torch.long).to(device)
+        input_ids = torch.zeros([bs, nc, seq_len], dtype=torch.long).to(device)
+        token_type_ids = torch.zeros([bs, nc, seq_len], dtype=torch.long).to(device)
+        attention_mask = torch.ones([bs, nc, seq_len]).to(device)
+        output_mask = torch.zeros([bs, nc]).to(device)
+
+        n_node = 200
+        concept_ids = torch.arange(end=n_node).repeat(bs, nc, 1).to(device)
+        adj_lengths = torch.zeros([bs, nc], dtype=torch.long).fill_(10).to(device)
+
+        n_edges = 3
+        edge_index = torch.tensor([[1, 2, 3], [4, 5, 6]]).to(device)
+        edge_type = torch.zeros(n_edges, dtype=torch.long).fill_(2).to(device)
+
+        node_type = torch.zeros([bs, nc, n_node], dtype=torch.long).to(device)
+        node_type[:, :, 0] = 3
+        node_score = torch.zeros([bs, nc, n_node, 1]).to(device)
+        node_score[:, :, 1] = 180
+
+        special_nodes_mask = torch.zeros([bs, nc, n_node], dtype=torch.long).to(device)
+
+        edge_index = [[edge_index] * nc] * bs
+        edge_type = [[edge_type] * nc] * bs
+
+        pos_triples = [[ [torch.zeros( [100,], dtype=torch.long ) ] * 3] * nc] * bs
+        neg_nodes = [[torch.zeros([seq_len,64], dtype=torch.long) ] * nc] * bs
+        return lm_inputs, lm_labels, input_ids, attention_mask, token_type_ids, output_mask, \
+            concept_ids, node_type, node_score, adj_lengths, special_nodes_mask, \
+            edge_index, edge_type, pos_triples, neg_nodes
+
+
+    def check_outputs(self, logits, lm_loss, link_losses):
+        bs = 2
+        nc = 5
+        assert logits.size() == (bs, nc)
+        print("logits", logits)
+        print("lm_loss", lm_loss)
+        print("link_losses", link_losses)
+        n_edges = 3
+
+
+def test_DRAGON(device):
+        cp_emb = torch.load("../data/cpnet/cp_emb.pt")
+        test_args = Args()
+        model = DRAGON(pretrained_concept_emb=cp_emb,args=test_args).to(device)
+        inputs = model.get_fake_inputs(device)
+        outputs = model(*inputs)
+        model.check_outputs(*outputs)
 
 ModelClass = modeling_t5.T5Model
 # ModelClass = T5EncoderModel
@@ -55,7 +205,7 @@ print("PreTrainedModelClass:", PreTrainedModelClass)
 
 class LMGNN(PreTrainedModelClass):
 
-    def __init__(self, config, args={}, model_name="roberta-large", k=5, n_ntype=4, n_etype=38,
+    def __init__(self, config, args={}, model_name="t5-small", k=5, n_ntype=4, n_etype=38,
                  n_concept=799273, concept_dim=200, concept_in_dim=1024, n_attention_head=2,
                  fc_dim=200, n_fc_layer=0, p_emb=0.2, p_gnn=0.2, p_fc=0.2,
                  pretrained_concept_emb=None, freeze_ent_emb=True,
@@ -145,12 +295,13 @@ class LMGNN(PreTrainedModelClass):
         """
         #LM inputs
         lm_input_ids, lm_labels, input_ids, attention_mask, token_type_ids, output_mask = inputs
-        # if self.args.mlm_task: #TODO: what is this?
-        #     input_ids = lm_input_ids
+        if self.args.mlm_task:
+            input_ids = lm_input_ids
 
         # GNN inputs
         concept_ids[concept_ids == 0] = self.cpnet_vocab_size + 2
         if self.k >= 0:
+            # concept_ids [batch_size, n_node]
             gnn_input = self.concept_emb(concept_ids - 1, emb_data).to(node_type_ids.device)
         else:
             gnn_input = torch.zeros((concept_ids.size(0), concept_ids.size(1), self.concept_dim)).float().to(node_type_ids.device)
@@ -180,6 +331,8 @@ class LMGNN(PreTrainedModelClass):
         all_hidden_states = lm_outputs[-1] # ([bs, seq_len, sent_dim] for _ in range(7))
         lm_hidden_states = all_hidden_states[self.layer_id] # [bs, seq_len, sent_dim]
         sent_vecs = t5gnn.pooler(lm_hidden_states, attention_mask.to(torch.bool)) # [bs, sent_dim]
+        # TODO: check why sent_vecs is nan when test (meanpooler is nan, maxpooler is not -inf)
+        # The original does not have this problem
 
         # sent_token_mask = output_mask.clone()
         # sent_token_mask[:, 0] = 0
@@ -212,7 +365,7 @@ class LMGNN(PreTrainedModelClass):
         Z_vecs = gnn_output[:,0]   #(batch_size, dim_node)
 
         node_mask = torch.arange(node_type_ids.size(1), device=node_type_ids.device) >= adj_lengths.unsqueeze(1) #[bs, nodes] 1 means masked out
-        gnn_output = gnn_output * (~node_mask).float().unsqueeze(2)
+        gnn_output = gnn_output * (~node_mask).float().unsqueeze(2) # [bs, n_node, dim_node]
         node_mask = node_mask | (node_type_ids == 3) # pool over all KG nodes (excluding the context node)
         node_mask[node_mask.all(1), 0] = 0  # a temporary solution to avoid zero node
 
@@ -256,6 +409,7 @@ class LMGNN(PreTrainedModelClass):
             sent_vecs_for_pooler = sent_vecs
             if self.k >= 0:
                 graph_vecs, pool_attn = self.pooler(sent_vecs_for_pooler, gnn_output, node_mask) #graph_vecs: [bs, node_dim]
+                # pool_attn: [40, 200] [?,?]
                 concat_pool = torch.cat((graph_vecs, sent_vecs, Z_vecs), 1)
             else:
                 concat_pool = sent_vecs
@@ -567,11 +721,15 @@ class LMGNN(PreTrainedModelClass):
         return model
 
     def get_fake_inputs(self, device="cuda:0"):
-        bs = 20
+        bs = 2
         seq_len = 100
         input_ids = torch.zeros([bs, seq_len], dtype=torch.long).to(device)
+        lm_input_ids = torch.zeros([bs, seq_len], dtype=torch.long).to(device)
+        lm_labls = torch.zeros([bs, seq_len], dtype=torch.long).to(device)
+
         token_type_ids = torch.zeros([bs, seq_len], dtype=torch.long).to(device)
         attention_mask = torch.ones([bs, seq_len]).to(device)
+        output_mask = torch.ones([bs, seq_len]).to(device)
 
         n_node = 200
         concept_ids = torch.arange(end=n_node).repeat(bs, 1).to(device)
@@ -588,18 +746,19 @@ class LMGNN(PreTrainedModelClass):
         node_score[:, 1] = 180
 
         # if link_task == False:
-        lp_data = []
-        return (None, None, input_ids, attention_mask, token_type_ids, None), concept_ids, node_type, node_score, adj_lengths, [], adj, lp_data
+        pos_triples = torch.zeros([3, 1000]).to(device).type(torch.long)
+        neg_nodes = torch.zeros([1000, 64]).to(device).type(torch.long)
+        lp_data = (pos_triples, neg_nodes)
+        special_nodes_mask = torch.zeros([bs, n_node]).to(device)
+        return (lm_input_ids, lm_labls, input_ids, attention_mask, token_type_ids, output_mask), \
+            concept_ids, node_type, node_score, adj_lengths, special_nodes_mask, adj, lp_data
 
-    # def check_outputs(self, logits, pool_attn):
-    #     bs = 20
-    #     assert logits.size() == (bs, 1)
-    #     n_edges = 3
-    #
     def check_outputs(self, logits):
-        bs = 20
+        bs = 2
         assert logits.size() == (bs, 1)
-        n_edges = 3
+
+        #test for lm_loss
+
 
 def test_LMGNN(device):
         cp_emb = torch.load("../data/cpnet/cp_emb.pt")
@@ -1315,6 +1474,7 @@ if __name__ == "__main__":
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
     # test_T5GAT(device)
-    test_TextKGMessagePassing(device)
+    # test_TextKGMessagePassing(device)
 
     # test_LMGNN(device)
+    test_DRAGON(device)
