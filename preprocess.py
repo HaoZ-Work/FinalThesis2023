@@ -25,6 +25,11 @@ input_paths = {
         'dev': './analysis/wrong_predicted_questions_dev.jsonl',
         'test': './analysis/wrong_predicted_questions_test.jsonl',
     },
+    'csqa_debug': {
+        'train': './data/csqa-debug/train_rand_split.jsonl',
+        'dev': './data/csqa-debug/dev_rand_split.jsonl',
+        'test': './data/csqa-debug/test_rand_split_no_answers.jsonl',
+    },
     'riddle': {
         'train': './data/riddle/train.jsonl',
         'dev':   './data/riddle/devIH.jsonl',
@@ -84,6 +89,23 @@ output_paths = {
             'adj-test': './analysis/wrong_predicted_questions_test.graph.adj.pk',
         }
 
+    },
+    'csqa_debug': {
+        'statement': {
+            'train': './data/csqa-debug/statement/train.statement.jsonl',
+            'dev': './data/csqa-debug/statement/dev.statement.jsonl',
+            'test': './data/csqa-debug/statement/test.statement.jsonl',
+        },
+        'grounded': {
+            'train': './data/csqa-debug/grounded/train.grounded.jsonl',
+            'dev': './data/csqa-debug/grounded/dev.grounded.jsonl',
+            'test': './data/csqa-debug/grounded/test.grounded.jsonl',
+        },
+        'graph': {
+            'adj-train': './data/csqa-debug/graph/train.graph.adj.pk',
+            'adj-dev': './data/csqa-debug/graph/dev.graph.adj.pk',
+            'adj-test': './data/csqa-debug/graph/test.graph.adj.pk',
+        },
     },
     'riddle': {
         'statement': {
@@ -146,7 +168,7 @@ for dname in ['medqa']:
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--run', default=['common', 'csqa', 'obqa','csqa_analyze'], nargs='+')
+    parser.add_argument('--run', default=['common', 'csqa', 'obqa','csqa_analyze', 'csqa_debug'], nargs='+')
     parser.add_argument('-p', '--nprocs', type=int, default=cpu_count(), help='number of processes to use')
     parser.add_argument('--debug', action='store_true', help='enable debug mode')
 
@@ -189,6 +211,20 @@ def main():
                                       output_paths['cpnet']['patterns'], output_paths['csqa_analyze']['grounded']['test'], args.nprocs)},
             {'func': generate_adj_data_from_grounded_concepts__use_LM, 'args': (output_paths['csqa_analyze']['grounded']['dev'], output_paths['cpnet']['pruned-graph'], output_paths['cpnet']['vocab'], output_paths['csqa_analyze']['graph']['adj-dev'], args.nprocs)},
             {'func': generate_adj_data_from_grounded_concepts__use_LM, 'args': (output_paths['csqa_analyze']['grounded']['test'], output_paths['cpnet']['pruned-graph'], output_paths['cpnet']['vocab'], output_paths['csqa_analyze']['graph']['adj-test'], args.nprocs)},
+        ],
+        'csqa_debug': [
+            {'func': convert_to_entailment, 'args': (input_paths['csqa_debug']['train'], output_paths['csqa_debug']['statement']['train'])},
+            {'func': convert_to_entailment, 'args': (input_paths['csqa_debug']['dev'], output_paths['csqa_debug']['statement']['dev'])},
+            {'func': convert_to_entailment, 'args': (input_paths['csqa_debug']['test'], output_paths['csqa_debug']['statement']['test'])},
+            {'func': ground, 'args': (output_paths['csqa_debug']['statement']['dev'], output_paths['cpnet']['vocab'],
+                                      output_paths['cpnet']['patterns'], output_paths['csqa_debug']['grounded']['dev'], args.nprocs)},
+            {'func': ground, 'args': (output_paths['csqa_debug']['statement']['train'], output_paths['cpnet']['vocab'],
+                                      output_paths['cpnet']['patterns'], output_paths['csqa_debug']['grounded']['train'], args.nprocs)},
+            {'func': ground, 'args': (output_paths['csqa_debug']['statement']['test'], output_paths['cpnet']['vocab'],
+                                      output_paths['cpnet']['patterns'], output_paths['csqa_debug']['grounded']['test'], args.nprocs)},
+            {'func': generate_adj_data_from_grounded_concepts__use_LM, 'args': (output_paths['csqa_debug']['grounded']['dev'], output_paths['cpnet']['pruned-graph'], output_paths['cpnet']['vocab'], output_paths['csqa_debug']['graph']['adj-dev'], args.nprocs)},
+            {'func': generate_adj_data_from_grounded_concepts__use_LM, 'args': (output_paths['csqa_debug']['grounded']['train'], output_paths['cpnet']['pruned-graph'], output_paths['cpnet']['vocab'], output_paths['csqa_debug']['graph']['adj-train'], args.nprocs)},
+            {'func': generate_adj_data_from_grounded_concepts__use_LM, 'args': (output_paths['csqa_debug']['grounded']['test'], output_paths['cpnet']['pruned-graph'], output_paths['cpnet']['vocab'], output_paths['csqa_debug']['graph']['adj-test'], args.nprocs)},
         ],
         'riddle': [
             {'func': convert_to_entailment, 'args': (input_paths['riddle']['train'], output_paths['riddle']['statement']['train'])},
