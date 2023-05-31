@@ -18,6 +18,7 @@ except:
 import wandb
 
 from modeling import modeling_dragon
+# from modeling import modeling_dragon_T5 as modeling_dragon
 from utils import data_utils
 from utils import optimization_utils
 from utils import parser_utils
@@ -73,6 +74,19 @@ def load_data(args, devices, kg):
             max_node_num=args.max_node_num, max_seq_length=args.max_seq_len,
             is_inhouse=args.inhouse, inhouse_train_qids_path=args.inhouse_train_qids,
             subsample=args.subsample, n_train=args.n_train, debug=args.debug, cxt_node_connects_all=args.cxt_node_connects_all, kg=kg)
+
+    # for batch_idx, *inputs in enumerate(dataset.train()):
+    #     print(len(inputs),file=sys.stderr)
+    #     for input in inputs:
+    #         for i in input:
+    #             if type(i) == torch.Tensor:
+    #                 print(i.size(), file=sys.stderr)
+    #             if type(i) == list:
+    #                 print(len(i), file=sys.stderr)
+    #                 for j in i:
+    #                     print(type(j), file=sys.stderr)
+
+        # assert 1==0
 
     return dataset
 
@@ -391,6 +405,8 @@ def train(args, resume, has_test_split, devices, kg):
 
         for qids, labels, *input_data in tqdm(dataset.train(steps=args.redef_epoch_steps, local_rank=args.local_rank), desc="Batch", disable=args.local_rank not in [-1, 0]): #train_dataloader
             # labels: [bs]
+
+
             start_time = time.time()
             optimizer.zero_grad()
             bs = labels.size(0)
@@ -685,6 +701,8 @@ def main(args):
     elif "eval" in args.mode:
         assert args.world_size == 1, "DDP is only implemented for training"
         evaluate(args, has_test_split, devices, kg)
+    # elif args.mode == 'debug-set':
+    #     train(args, resume, has_test_split, devices, kg, debug=True)
     else:
         raise ValueError('Invalid mode')
 
@@ -783,4 +801,6 @@ if __name__ == '__main__':
     args.fp16 = args.fp16 and (torch.__version__ >= '1.6.0')
     if args.local_rank != -1:
         assert not args.dump_graph_cache
+
+    print(args,file=sys.stderr)
     main(args)
