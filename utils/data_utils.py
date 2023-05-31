@@ -110,6 +110,28 @@ class MultiGPUSparseAdjDataBatchGenerator(object):
             assert node_type_ids.dim() == 3
             edge_index, edge_type, pos_triples, neg_nodes = self.process_graph_data(edge_index, edge_type, node_type_ids)
 
+            # bs=16, nc=5, seqlen=100
+            # batch_qids: list [bs]
+            # batch_labels: tensor[bs,]
+            # batch_lm_inputs: tensor[bs, nc, seqlen]
+            # batch_lm_labels: tensor[bs, nc, seqlen]
+            # batch_tensors0: list [4], each tensor[bs, nc, seqlen]
+            ##  all_input_ids, [bs, nc, seqlen]
+            ##  all_input_mask, [bs, nc, seqlen]
+            #   all_segment_ids, [bs, nc, seqlen]
+            #   all_output_mask [bs, nc, seqlen]
+            # batch_lists0: list 0 ??
+            # batch_tensors1: list [5]
+            ##  concept_ids, [bs, nc, n_nodes]
+            #   node_type_ids, [bs, nc, n_nodes]
+            #   node_scores, [bs, nc, n_nodes,1]
+            #   adj_lengths, [bs, nc]
+            #   special_nodes_mask [bs, nc, n_nodes]
+            # batch_lists1: list 0 ??
+            # edge_index: list [16], 16*list, each list 5*[2, E] here E is the number of edges for each qa pair
+            # edge_type: list [16], 16*list, each list 5*[E, ] same E with edge_index
+            # pos_triples: list [16], 16*list, each list 5*list, each list 3 * [100]
+            # neg_nodes: list [16], 16*list, each list 5*list, each list tensor[100, 64]
             yield tuple([batch_qids, batch_labels, batch_lm_inputs, batch_lm_labels, *batch_tensors0, *batch_lists0, *batch_tensors1, *batch_lists1, edge_index, edge_type, pos_triples, neg_nodes])
 
     def _to_device(self, obj, device):
