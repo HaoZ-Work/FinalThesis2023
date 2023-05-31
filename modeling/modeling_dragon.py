@@ -39,12 +39,22 @@ print ('PreTrainedModelClass', PreTrainedModelClass)
 class Args:
     def __init__(self):
         self.residual_ie = 2
-        self.fp16 = False
-        self.upcast = False
+        self.fp16 = True
+        self.upcast = True
 
         # For LMGNN class
-        self.mlm_task = False
-        self.link_task = False
+        self.mlm_task = True
+        self.link_task = True
+        if self.link_task:
+            self.link_decoder = "DistMult"
+            self.link_negative_adversarial_sampling = True
+            self.link_negative_adversarial_sampling_temperature = 1.0
+            self.link_regularizer_weight = 0.0
+            self.link_proj_headtail = True
+            self.link_normalize_headtail = 3
+            self.scaled_distmult = True
+            # self.no_node_score = True
+            # self.end_task = True
         self.no_node_score = True
         self.end_task = True
 
@@ -109,9 +119,28 @@ class DRAGON(nn.Module):
         logits: [bs, nc]
         """
         bs, nc = inputs[0].size(0), inputs[0].size(1)
+        #inputs:
+        # bs=16, nc=5, seqlen=100
+        # batch_lm_inputs: tensor[bs, nc, seqlen]
+        # batch_lm_labels: tensor[bs, nc, seqlen]
+        ##  all_input_ids, [bs, nc, seqlen]
+        ##  all_input_mask, [bs, nc, seqlen]
+        #   all_segment_ids, [bs, nc, seqlen]
+        #   all_output_mask [bs, nc, seqlen]
+        ##  concept_ids, [bs, nc, n_nodes]
+        #   node_type_ids, [bs, nc, n_nodes]
+        #   node_scores, [bs, nc, n_nodes,1]
+        #   adj_lengths, [bs, nc]
+        #   special_nodes_mask [bs, nc, n_nodes]
+        # edge_index: list [16], 16*list, each list 5*[2, E] here E is the number of edges for each qa pair
+        # edge_type: list [16], 16*list, each list 5*[E, ] same E with edge_index
+        # pos_triples: list [16], 16*list, each list 5*list, each list 3 * [100]
+        # neg_nodes: list [16], 16*list, each list 5*list, each list tensor[100, 64]
+
 
         #Here, merge the batch dimension and the num_choice dimension
-        assert len(inputs) == 6 + 5 + 2 + 2  #6 lm_data, 5 gnn_data, (edge_index, edge_type), (pos_triples, neg_nodes)
+        assert len(inputs) == 6 + 5 + 2 + 2
+        #6 lm_data, 5 gnn_data, (edge_index, edge_type), (pos_triples, neg_nodes)
         edge_index_orig, edge_type_orig = inputs[-2:]
         _inputs = [x.reshape(x.size(0) * x.size(1), *x.size()[2:]) for x in inputs[:6]] + [x.reshape(x.size(0) * x.size(1), *x.size()[2:]) for x in inputs[6:11]] + [sum(x,[]) for x in inputs[11:15]]
 
@@ -138,9 +167,11 @@ class DRAGON(nn.Module):
             # edge_type_orig: list of (batch_size, num_choice). each entry is torch.tensor(E, )
 
     def get_fake_inputs(self, device="cuda:0"):
-        bs = 4
+        bs = 2
         nc = 5
         seq_len = 100
+        lm_inputs = torch.zeros([bs, nc, seq_len], dtype=torch.long).to(device)
+        lm_labels = torch.zeros([bs, nc, seq_len], dtype=torch.long).to(device)
         input_ids = torch.zeros([bs, nc, seq_len], dtype=torch.long).to(device)
         token_type_ids = torch.zeros([bs, nc, seq_len], dtype=torch.long).to(device)
         attention_mask = torch.ones([bs, nc, seq_len]).to(device)
@@ -154,25 +185,37 @@ class DRAGON(nn.Module):
         edge_index = torch.tensor([[1, 2, 3], [4, 5, 6]]).to(device)
         edge_type = torch.zeros(n_edges, dtype=torch.long).fill_(2).to(device)
 
-        edge_index = [[edge_index] * nc] * bs
-        edge_type = [[edge_type] * nc] * bs
-
         node_type = torch.zeros([bs, nc, n_node], dtype=torch.long).to(device)
         node_type[:, :, 0] = 3
         node_score = torch.zeros([bs, nc, n_node, 1]).to(device)
         node_score[:, :, 1] = 180
-        return input_ids, attention_mask, token_type_ids, output_mask, concept_ids, node_type, node_score, adj_lengths, edge_index, edge_type
 
-    def check_outputs(self, logits, attn):
-        bs = 4
+        special_nodes_mask = torch.zeros([bs, nc, n_node], dtype=torch.long).to(device)
+
+        edge_index = [[edge_index] * nc] * bs
+        edge_type = [[edge_type] * nc] * bs
+
+        pos_triples = [[ [torch.zeros( [100,], dtype=torch.long ) ] * 3] * nc] * bs
+        neg_nodes = [[torch.zeros([seq_len,64], dtype=torch.long) ] * nc] * bs
+        return lm_inputs, lm_labels, input_ids, attention_mask, token_type_ids, output_mask, \
+            concept_ids, node_type, node_score, adj_lengths, special_nodes_mask, \
+            edge_index, edge_type, pos_triples, neg_nodes
+
+
+    def check_outputs(self, logits, lm_loss, link_losses):
+        bs = 2
         nc = 5
         assert logits.size() == (bs, nc)
+        print("logits", logits)
+        print("lm_loss", lm_loss)
+        print("link_losses", link_losses)
         n_edges = 3
 
 
 def test_DRAGON(device):
     cp_emb = torch.load("../data/cpnet/cp_emb.pt")
-    model = DRAGON(pretrained_concept_emb=cp_emb).to(device)
+    test_args = Args()
+    model = DRAGON(pretrained_concept_emb=cp_emb,args=test_args).to(device)
     inputs = model.get_fake_inputs(device)
     outputs = model(*inputs)
     model.check_outputs(*outputs)
@@ -237,12 +280,20 @@ class LMGNN(PreTrainedModelClass):
 
     def _init_weights(self, module):
         if isinstance(module, (nn.Linear, nn.Embedding)):
+            # print("module: ", module)
+
             module.weight.data.normal_(mean=0.0, std=self.init_range)
             if hasattr(module, 'bias') and module.bias is not None:
                 module.bias.data.zero_()
+
+            # print("module.weight", module.weight)
+
         elif isinstance(module, nn.LayerNorm):
+            print("module: ", module)
+
             module.bias.data.zero_()
             module.weight.data.fill_(1.0)
+            # print("module.weight", module.weight)
 
     def forward(self, inputs, concept_ids, node_type_ids, node_scores, adj_lengths, special_nodes_mask, adj, lp_data, emb_data=None, cache_output=False):
         """
@@ -348,6 +399,9 @@ class LMGNN(PreTrainedModelClass):
             elif self.args.link_normalize_headtail == 3:
                 embs = self.emb_LayerNorm(embs)
 
+            # embs [total_n_triple, gnn_dim] (2000,200) float32
+            # pos_samples [3, total_n_triple] (3,1000) int64
+            # pos_samples = pos_samples.long()
             positive_score  = self.linkpred(embs, pos_samples) #[`total_n_triple`, 1]
             head_neg_scores = self.linkpred(embs, (pos_samples, head_negative_sample), mode='head-batch')
             tail_neg_scores = self.linkpred(embs, (pos_samples, tail_negative_sample), mode='tail-batch')
@@ -674,11 +728,15 @@ class LMGNN(PreTrainedModelClass):
         return model
 
     def get_fake_inputs(self, device="cuda:0"):
-        bs = 20
+        bs = 2
         seq_len = 100
         input_ids = torch.zeros([bs, seq_len], dtype=torch.long).to(device)
+        lm_input_ids = torch.zeros([bs, seq_len], dtype=torch.long).to(device)
+        lm_labls = torch.zeros([bs, seq_len], dtype=torch.long).to(device)
+
         token_type_ids = torch.zeros([bs, seq_len], dtype=torch.long).to(device)
         attention_mask = torch.ones([bs, seq_len]).to(device)
+        output_mask = torch.ones([bs, seq_len]).to(device)
 
         n_node = 200
         concept_ids = torch.arange(end=n_node).repeat(bs, 1).to(device)
@@ -695,8 +753,12 @@ class LMGNN(PreTrainedModelClass):
         node_score[:, 1] = 180
 
         # if link_task == False:
-        lp_data = []
-        return (None, None, input_ids, attention_mask, token_type_ids, None), concept_ids, node_type, node_score, adj_lengths, [], adj, lp_data
+        pos_triples=torch.zeros([3,1000]).to(device).type(torch.long)
+        neg_nodes = torch.zeros([1000,64]).to(device).type(torch.long)
+        lp_data = (pos_triples, neg_nodes)
+        special_nodes_mask = torch.zeros([bs, n_node]).to(device)
+        return (lm_input_ids, lm_labls, input_ids, attention_mask, token_type_ids, output_mask),\
+            concept_ids, node_type, node_score, adj_lengths, special_nodes_mask, adj, lp_data
 
     # def check_outputs(self, logits, pool_attn):
     #     bs = 20
@@ -704,7 +766,7 @@ class LMGNN(PreTrainedModelClass):
     #     n_edges = 3
     #
     def check_outputs(self, logits):
-        bs = 20
+        bs = 2
         assert logits.size() == (bs, 1)
         n_edges = 3
 
@@ -713,10 +775,10 @@ def test_LMGNN(device):
     cp_emb = torch.load("../data/cpnet/cp_emb.pt")
     test_args =Args()
     # model = LMGNN(pretrained_concept_emb=cp_emb).to(device)
-    model,loading_info = LMGNN.from_pretrained("t5-small", args=test_args, pretrained_concept_emb=cp_emb, output_loading_info=True,model_name="t5-small",k=5)
+    model,loading_info = LMGNN.from_pretrained("roberta-large", args=test_args, pretrained_concept_emb=cp_emb, output_loading_info=True,model_name="roberta-large",k=5)
     model.to(device)
-    print(model)
-    print(loading_info)
+    #print(model)
+    #print(loading_info)
     inputs = model.get_fake_inputs(device)
     outputs = model(*inputs)
     model.check_outputs(outputs[0])
@@ -1201,7 +1263,7 @@ class TextKGMessagePassing(ModelClass):
 def test_TextKGMessagePassing(device):
     test_args = Args()
     model = TextKGMessagePassing.from_pretrained("roberta-base", output_hidden_states=True, args=test_args, k=5).to(device)
-    print(model)
+    # print(model)
     inputs = model.get_fake_inputs(device)
     outputs = model(*inputs)
     model.check_outputs(*outputs)
@@ -1340,7 +1402,7 @@ def test_RoBERTaGAT(device):
 
     test_args = Args()
     model = RoBERTaGAT(config, args=test_args, sep_ie_layers=True).to(device)
-    print(model)
+    # print(model)
     inputs = model.get_fake_inputs(device)
     outputs = model(*inputs)
     model.check_outputs(*outputs)
@@ -1361,6 +1423,6 @@ if __name__ == "__main__":
 
     # test_TextKGMessagePassing(device)
 
-    test_LMGNN(device)
+    # test_LMGNN(device)
 
-    #test_DRAGON(device)
+    test_DRAGON(device)
