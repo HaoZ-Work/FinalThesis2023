@@ -9,14 +9,29 @@ import wandb
 from dotenv import load_dotenv
 
 
-def main(args):
 
+
+import os
+import torch
+from torch.utils.data import DataLoader
+from transformers import Adafactor, T5ForConditionalGeneration, T5Tokenizer
+from data_utils import DataLoaderCreator
+import argparse
+from tqdm import tqdm
+import wandb
+
+def main():
     # Start a new run
     load_dotenv()
     api_key = os.getenv("WANDB_API")
 
     wandb.login(key=api_key)
-    wandb.init(project='FinalThesis2023', entity='haoz', name='T5_finetuning_csqa')
+
+    run =   wandb.init(project='FinalThesis2023', entity='haoz', name='T5_finetuning_csqa')
+
+    # Retrieve hyperparameters from W&B
+    config = run.config
+    args = argparse.Namespace(**config)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -94,6 +109,8 @@ def main(args):
         # If this model is the best so far, save it
         if val_loss < best_val_loss:
             best_val_loss = val_loss
+            if best_model_path is not None:  # If a best model exists, remove it
+                os.remove(best_model_path)
             best_model_path = f"{ckpt_dir_name}/model_epoch_{epoch+1}.pt"
             torch.save(model.state_dict(), best_model_path)
 
@@ -101,33 +118,31 @@ def main(args):
         model.load_state_dict(torch.load(best_model_path))
         print("Loaded best model.")
 
-    # Evaluate on test set
-    model.eval()
-    total_loss = 0
-    with torch.no_grad():
-        for i, batch in tqdm(enumerate(test_dataloader), total=len(test_dataloader), desc="Testing"):
-            input_ids = batch["input_ids"].to(device)
-            attention_mask = batch["attention_mask"].to(device)
-            labels = batch["labels"].to(device)
-
-            # forward pass
-            outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
-
-            # accumulate loss
-            total_loss += outputs.loss.item()
-
-    print(f"Test Loss: {total_loss / len(test_dataloader)}")
-    wandb.log({"Test Loss": total_loss / len(test_dataloader)})
-
 
 if __name__ == "__main__":
+    # Parsing arguments
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_name", type=str, default="t5-small")
     parser.add_argument("--data_type", type=str, default="csqa-debug")
-    parser.add_argument("--batch_size", type=int, default=8)
-    parser.add_argument("--source_max_length", type=int, default=512)
-    parser.add_argument("--target_max_length", type=int, default=128)
-    parser.add_argument("--epochs", type=int, default=20)
     args = parser.parse_args()
 
-    main(args)
+    # sweep configuration
+    sweep_config = {
+        "method": "random",  # or "bayes"
+        "metric": {
+            "name": "Validation Loss",
+            "goal": "minimize",
+        },
+        "parameters": {
+            "batch_size": {"values": [4, 8, 16]},
+            "source_max_length": {"values": [128, 256, 512]},
+            "target_max_length": {"values": [32, 64, 128]},
+            "epochs": {"values": [5, 10, 20]},
+            "model_name": {"value": args.model_name},
+            "data_type": {"value": args.data_type},
+        },
+    }
+
+    sweep_id = wandb.sweep(sweep_config)
+    wandb.agent(sweep_id, function=main)
+
