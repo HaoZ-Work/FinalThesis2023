@@ -4,40 +4,6 @@ import torch
 import json
 from transformers import Adafactor
 
-DATA_BASE_PATH = '../data/csqa-debug/'
-# DATA_BASE_PATH = '../data/csqa/'
-
-csqa_debug_dev_path = DATA_BASE_PATH+'dev_rand_split.jsonl'
-
-
-# Load inhouse_split_qids.txt
-with open(DATA_BASE_PATH+"inhouse_split_qids.txt", "r") as file:
-    train_qids = set(line.strip() for line in file)
-
-# Load and split train_rand_split.jsonl
-train_data = []
-test_data = []
-
-with open(DATA_BASE_PATH+"train_rand_split.jsonl", "r") as file:
-    for line in file:
-        item = json.loads(line)
-        if item["id"] in train_qids:
-            train_data.append(item)
-        else:
-            test_data.append(item)
-
-# Now train_data contains the training set and test_data contains the test set
-
-
-
-dev_data = []
-
-with open(csqa_debug_dev_path, 'r') as file:
-    for line in file:
-        dev_data.append(json.loads(line))
-
-
-
 # initialize tokenizer and model
 tokenizer = T5Tokenizer.from_pretrained("t5-small")
 model = T5ForConditionalGeneration.from_pretrained("t5-small")
@@ -99,9 +65,9 @@ class DataLoaderCreator:
 
     def create_dataloaders(self, data_type='csqa-debug'):
         if data_type == 'csqa':
-            DATA_BASE_PATH = '../data/csqa/'
+            DATA_BASE_PATH = './data/csqa/'
         else:
-            DATA_BASE_PATH = '../data/csqa-debug/'
+            DATA_BASE_PATH = './data/csqa-debug/'
 
         csqa_debug_dev_path = DATA_BASE_PATH+'dev_rand_split.jsonl'
 
