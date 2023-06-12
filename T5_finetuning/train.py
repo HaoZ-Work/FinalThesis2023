@@ -1,19 +1,8 @@
-import os
-import torch
-from torch.utils.data import DataLoader
-from transformers import Adafactor, T5ForConditionalGeneration, T5Tokenizer
-from data_utils import DataLoaderCreator
-import argparse
-from tqdm import tqdm
-import wandb
+import re
+import string
 from dotenv import load_dotenv
-
-
-
-
 import os
 import torch
-from torch.utils.data import DataLoader
 from transformers import Adafactor, T5ForConditionalGeneration, T5Tokenizer
 from data_utils import DataLoaderCreator
 import argparse
@@ -32,8 +21,58 @@ def set_seed(seed):
         torch.cuda.manual_seed_all(seed)
 
 
+def normalize_answer(s):
+    """Lower text and remove punctuation, articles and extra whitespace."""
+    def remove_articles(text):
+        regex = re.compile(r"\b(a|an|the)\b", re.UNICODE)
+        return re.sub(regex, " ", text)
 
-def train_model(model, optimizer, train_dataloader, dev_dataloader, config, run):
+    def white_space_fix(text):
+        return " ".join(text.split())
+
+    def remove_punc(text):
+        exclude = set(string.punctuation)
+        return "".join(ch for ch in text if ch not in exclude)
+
+    def lower(text):
+        return text.lower()
+
+    return white_space_fix(remove_articles(remove_punc(lower(s))))
+
+def calculate_accuracy(model, tokenizer, dataloader, device):
+    model.eval()
+    correct_predictions = 0
+    total_predictions = 0
+    pad_token_id = tokenizer.pad_token_id  # get the ID for the <pad> token
+
+
+    with torch.no_grad():
+        for i, batch in tqdm(enumerate(dataloader), total=len(dataloader), desc="Calculating Accuracy"):
+            input_ids = batch["input_ids"].to(device)
+            attention_mask = batch["attention_mask"].to(device)
+            labels = batch["labels"].to(device)
+
+            # replace -100 in the labels with pad_token_id
+            labels = labels.where(labels != -100, torch.tensor(pad_token_id, device=device))
+
+            # forward pass
+            outputs = model.generate(input_ids=input_ids, attention_mask=attention_mask)
+
+            # convert model output tensors to strings
+            predicted_texts = [normalize_answer(tokenizer.decode(t, skip_special_tokens=True)) for t in outputs]
+            actual_texts = [normalize_answer(tokenizer.decode(t, skip_special_tokens=True)) for t in labels]
+            # print("Predicted Texts: ", predicted_texts, "\nActual Texts: ", actual_texts)
+            # compare predictions to actuals
+            correct_predictions += sum([actual == predicted for actual, predicted in zip(actual_texts, predicted_texts)])
+            total_predictions += len(actual_texts)
+
+    # calculate accuracy
+    accuracy = correct_predictions / total_predictions
+
+    return accuracy
+
+
+def train_model(model, optimizer, train_dataloader, dev_dataloader, config, tokenizer):
     device = model.device
     args = config
     # create directory for checkpoints
@@ -45,6 +84,7 @@ def train_model(model, optimizer, train_dataloader, dev_dataloader, config, run)
     best_model_path = None  # Keep track of best model path
 
     # training loop
+    step = 0
     for epoch in range(args.epochs):
         print(f"Epoch {epoch+1}/{args.epochs}")
 
@@ -65,11 +105,19 @@ def train_model(model, optimizer, train_dataloader, dev_dataloader, config, run)
             loss.backward()
             optimizer.step()
 
+            step += 1
+
             # clear the gradients
             optimizer.zero_grad()
 
             # log the loss
             wandb.log({"Train Loss": loss.item()})
+
+            # Call calculate_accuracy every 100 steps
+            if step % 100 == 0:
+                accuracy = calculate_accuracy(model, tokenizer, dev_dataloader, device)
+                print(f"Validation Accuracy at step {step}: {accuracy}")
+                wandb.log({"Validation Accuracy": accuracy})
 
         # Evaluate on dev set
         model.eval()
@@ -127,6 +175,7 @@ def main(config=None):
     # Initialize the model and tokenizer
     tokenizer = T5Tokenizer.from_pretrained(args.model_name)
     model = T5ForConditionalGeneration.from_pretrained(args.model_name)
+    model_vocab_size = model.config.vocab_size
 
     # move model to the device
     model = model.to(device)
@@ -142,7 +191,7 @@ def main(config=None):
     wandb.watch(model, log_freq=100)
 
     # Train the model
-    train_model(model, optimizer, train_dataloader, dev_dataloader, args, run)
+    train_model(model, optimizer, train_dataloader, dev_dataloader, args, tokenizer)
 
 
 
