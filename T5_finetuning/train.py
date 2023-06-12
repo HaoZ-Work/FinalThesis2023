@@ -20,12 +20,24 @@ import argparse
 from tqdm import tqdm
 import wandb
 
+import random
+import numpy as np
+
+
+def set_seed(seed):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+
+
 def main():
     # Start a new run
-    load_dotenv()
-    api_key = os.getenv("WANDB_API")
+    set_seed(42)
 
-    wandb.login(key=api_key)
+
 
     run =   wandb.init(project='FinalThesis2023', entity='haoz', name='T5_finetuning_csqa')
 
@@ -122,27 +134,65 @@ def main():
 if __name__ == "__main__":
     # Parsing arguments
     parser = argparse.ArgumentParser()
+    parser.add_argument("--mode", type=str, required=True, help="'sweeps' for hyperparameter search, 'train' for training")
+    parser.add_argument("--machine", type=str, required=True, help="'slurm' for SLURM, 'local' for local machine")
     parser.add_argument("--model_name", type=str, default="t5-small")
     parser.add_argument("--data_type", type=str, default="csqa-debug")
+    parser.add_argument("--batch_size", type=int, default=8)
+    parser.add_argument("--source_max_length", type=int, default=256)
+    parser.add_argument("--target_max_length", type=int, default=64)
+    parser.add_argument("--epochs", type=int, default=10)
     args = parser.parse_args()
+
+    print(f"Running on machine: {args.machine}")
+    print(f"The home path is{os.environ['HOME']}")
+
+    if args.machine == 'slurm':
+        os.environ['HOME'] = '/ukp-storage-1/zhang'
+    elif args.machine == 'local':
+        pass
+    else:
+        print(f"Unknown machine {args.machine}")
+        exit(1)
 
     # sweep configuration
     sweep_config = {
-        "method": "random",  # or "bayes"
+        "name": "T5 Hyperparameter Search",
+        "method": "grid",  # or "bayes"
         "metric": {
             "name": "Validation Loss",
             "goal": "minimize",
         },
         "parameters": {
-            "batch_size": {"values": [4, 8, 16]},
-            "source_max_length": {"values": [128, 256, 512]},
-            "target_max_length": {"values": [32, 64, 128]},
-            "epochs": {"values": [5, 10, 20]},
+            "batch_size": {"values": [3, 4,]},
+            "source_max_length": {"values": [512]},
+            "target_max_length": {"values": [128]},
+            "epochs": {"values": [5]},
             "model_name": {"value": args.model_name},
             "data_type": {"value": args.data_type},
         },
     }
 
-    sweep_id = wandb.sweep(sweep_config)
-    wandb.agent(sweep_id, function=main)
+    load_dotenv()
+    api_key = os.getenv("WANDB_API")
+
+    wandb.login(key=api_key)
+
+
+    if args.mode == 'sweeps':
+        sweep_id = wandb.sweep(sweep_config, project='FinalThesis2023', entity='haoz')
+        wandb.agent(sweep_id, function=main)
+    elif args.mode == 'train':
+        # Fetch hyperparameters from args
+        config = {
+            "batch_size": args.batch_size,
+            "source_max_length": args.source_max_length,
+            "target_max_length": args.target_max_length,
+            "epochs": args.epochs,
+            "model_name": args.model_name,
+            "data_type": args.data_type,
+        }
+        main(config)
+    else:
+        print(f"Unknown mode {args.mode}")
 
