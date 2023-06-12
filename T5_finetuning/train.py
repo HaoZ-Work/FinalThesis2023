@@ -76,7 +76,7 @@ def train_model(model, optimizer, train_dataloader, dev_dataloader, config, toke
     device = model.device
     args = config
     # create directory for checkpoints
-    ckpt_dir_name = f"checkpoints/bs_{args.batch_size}_opt_{optimizer.__class__.__name__}_epochs_{args.epochs}"
+    ckpt_dir_name = f"T5_finetuning/checkpoints/bs_{args.batch_size}_opt_{optimizer.__class__.__name__}_epochs_{args.epochs}"
     os.makedirs(ckpt_dir_name, exist_ok=True)
 
     # Initialize best validation loss to infinity
@@ -162,7 +162,7 @@ def main(config=None):
 
         run = wandb.init(project='FinalThesis2023', entity='haoz', config=config)
         config = run.config
-        run_name = f"{config['mode']}_bs{config['batch_size']}_sml{config['source_max_length']}_tml{config['target_max_length']}_e{config['epochs']}"
+        run_name = f"{config['mode']}_bs{config['batch_size']}_e{config['epochs']}"
         wandb.run.name = run_name
         wandb.run.save()
 
@@ -184,7 +184,7 @@ def main(config=None):
     optimizer = Adafactor(model.parameters(), relative_step=True, warmup_init=True)
 
     # Initialize dataloaders using DataLoaderCreator
-    data_loader_creator = DataLoaderCreator(source_max_length=args.source_max_length, target_max_length=args.target_max_length, batch_size=args.batch_size)
+    data_loader_creator = DataLoaderCreator(tokenizer,source_max_length=args.source_max_length, target_max_length=args.target_max_length, batch_size=args.batch_size)
     train_dataloader, dev_dataloader, test_dataloader = data_loader_creator.create_dataloaders(data_type=args.data_type)
 
     # Watch the model
@@ -221,7 +221,27 @@ if __name__ == "__main__":
         exit(1)
 
     # sweep configuration
-    sweep_name = f"T5HS_{args.machine}_{args.data_type}"
+    sweep_name = f"T5HS_{args.model_name}_{args.machine}_{args.data_type}"
+    # final sweep configuration
+    # sweep_config = {
+    #     "name": sweep_name,
+    #     "method": "grid",  # or "bayes"
+    #     "metric": {
+    #         "name": "Validation Loss",
+    #         "goal": "minimize",
+    #     },
+    #     "parameters": {
+    #         "batch_size": {"values": [4,8,32, 64,128]},
+    #         "source_max_length": {"values": [512]},
+    #         "target_max_length": {"values": [128]},
+    #         "epochs": {"values": [5,10,20,50]},
+    #         "model_name": {"value": args.model_name},
+    #         "data_type": {"value": args.data_type},
+    #         "mode": {"value": args.mode},
+    #     },
+    # }
+
+    # debug sweep configuration
     sweep_config = {
         "name": sweep_name,
         "method": "grid",  # or "bayes"
@@ -230,10 +250,10 @@ if __name__ == "__main__":
             "goal": "minimize",
         },
         "parameters": {
-            "batch_size": {"values": [5]},
+            "batch_size": {"values": [1]},
             "source_max_length": {"values": [512]},
             "target_max_length": {"values": [128]},
-            "epochs": {"values": [5]},
+            "epochs": {"values": [5,]},
             "model_name": {"value": args.model_name},
             "data_type": {"value": args.data_type},
             "mode": {"value": args.mode},
