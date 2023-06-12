@@ -1,12 +1,10 @@
 from torch.utils.data import Dataset, DataLoader
 from transformers import T5Tokenizer, T5ForConditionalGeneration
-import torch
 import json
-from transformers import Adafactor
 
 # initialize tokenizer and model
-tokenizer = T5Tokenizer.from_pretrained("t5-small")
-model = T5ForConditionalGeneration.from_pretrained("t5-small")
+# tokenizer = T5Tokenizer.from_pretrained("t5-small")
+# model = T5ForConditionalGeneration.from_pretrained("t5-small")
 
 # task-specific parameters
 source_max_length = 512
@@ -21,6 +19,7 @@ class CSQADataset(Dataset):
         self.tokenizer = tokenizer
         self.source_max_length = source_max_length
         self.target_max_length = target_max_length
+        self.tokenizer=tokenizer
 
     def __len__(self):
         return len(self.data)
@@ -51,7 +50,7 @@ class CSQADataset(Dataset):
         )
 
         labels = target_encoding.input_ids
-        labels[labels == tokenizer.pad_token_id] = -100
+        labels[labels == self.tokenizer.pad_token_id] = -100
 
         return {
             "input_ids": encoding.input_ids.flatten(),
@@ -61,11 +60,11 @@ class CSQADataset(Dataset):
 
 
 class DataLoaderCreator:
-    def __init__(self, source_max_length=512, target_max_length=128, batch_size=8):
+    def __init__(self, tokenizer , source_max_length=512, target_max_length=128, batch_size=8):
         self.source_max_length = source_max_length
         self.target_max_length = target_max_length
         self.batch_size = batch_size
-        self.tokenizer = T5Tokenizer.from_pretrained("t5-small")
+        self.tokenizer = tokenizer
 
     def create_dataloaders(self, data_type='csqa-debug'):
         if data_type == 'csqa':
