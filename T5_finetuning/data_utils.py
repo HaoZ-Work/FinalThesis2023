@@ -28,10 +28,14 @@ class CSQADataset(Dataset):
     def __getitem__(self, idx):
         item = self.data[idx]
         question = item["question"]["stem"]
-        correct_choice_text = next(choice["text"] for choice in item["question"]["choices"] if choice["label"] == item["answerKey"])
+        correct_choice_text = next(
+            choice["text"] for choice in item["question"]["choices"] if choice["label"] == item["answerKey"])
+
+        # Creating a string of all answer choices
+        all_choice_text = ' '.join([choice["text"] for choice in item["question"]["choices"]])
 
         encoding = self.tokenizer(
-            f"question: {question}",
+            f"question: {question} choices: {all_choice_text}",
             truncation=True,
             max_length=self.source_max_length,
             padding="max_length",
