@@ -33,37 +33,9 @@ def set_seed(seed):
 
 
 
-def main():
-    # Start a new run
-    set_seed(42)
-
-
-
-    run =   wandb.init(project='FinalThesis2023', entity='haoz', name='T5_finetuning_csqa')
-
-    # Retrieve hyperparameters from W&B
-    config = run.config
-    args = argparse.Namespace(**config)
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    # Initialize the model and tokenizer
-    tokenizer = T5Tokenizer.from_pretrained(args.model_name)
-    model = T5ForConditionalGeneration.from_pretrained(args.model_name)
-
-    # move model to the device
-    model = model.to(device)
-
-    # initialize optimizer
-    optimizer = Adafactor(model.parameters(), relative_step=True, warmup_init=True)
-
-    # Initialize dataloaders using DataLoaderCreator
-    data_loader_creator = DataLoaderCreator(source_max_length=args.source_max_length, target_max_length=args.target_max_length, batch_size=args.batch_size)
-    train_dataloader, dev_dataloader, test_dataloader = data_loader_creator.create_dataloaders(data_type=args.data_type)
-
-    # Watch the model
-    wandb.watch(model, log_freq=100)
-
+def train_model(model, optimizer, train_dataloader, dev_dataloader, config, run):
+    device = model.device
+    args = config
     # create directory for checkpoints
     ckpt_dir_name = f"checkpoints/bs_{args.batch_size}_opt_{optimizer.__class__.__name__}_epochs_{args.epochs}"
     os.makedirs(ckpt_dir_name, exist_ok=True)
@@ -130,6 +102,49 @@ def main():
         model.load_state_dict(torch.load(best_model_path))
         print("Loaded best model.")
 
+def main(config=None):
+    # Start a new run
+    set_seed(42)
+
+    if config != None:
+        run_name = f"{config['mode']}_bs{config['batch_size']}_e{config['epochs']}"
+
+        run = wandb.init(project='FinalThesis2023', entity='haoz', name=run_name, config=config)
+    else:
+
+        run = wandb.init(project='FinalThesis2023', entity='haoz', config=config)
+        config = run.config
+        run_name = f"{config['mode']}_bs{config['batch_size']}_sml{config['source_max_length']}_tml{config['target_max_length']}_e{config['epochs']}"
+        wandb.run.name = run_name
+        wandb.run.save()
+
+
+    # Retrieve hyperparameters from W&B
+    args = argparse.Namespace(**run.config)
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # Initialize the model and tokenizer
+    tokenizer = T5Tokenizer.from_pretrained(args.model_name)
+    model = T5ForConditionalGeneration.from_pretrained(args.model_name)
+
+    # move model to the device
+    model = model.to(device)
+
+    # initialize optimizer
+    optimizer = Adafactor(model.parameters(), relative_step=True, warmup_init=True)
+
+    # Initialize dataloaders using DataLoaderCreator
+    data_loader_creator = DataLoaderCreator(source_max_length=args.source_max_length, target_max_length=args.target_max_length, batch_size=args.batch_size)
+    train_dataloader, dev_dataloader, test_dataloader = data_loader_creator.create_dataloaders(data_type=args.data_type)
+
+    # Watch the model
+    wandb.watch(model, log_freq=100)
+
+    # Train the model
+    train_model(model, optimizer, train_dataloader, dev_dataloader, args, run)
+
+
 
 if __name__ == "__main__":
     # Parsing arguments
@@ -139,11 +154,12 @@ if __name__ == "__main__":
     parser.add_argument("--model_name", type=str, default="t5-small")
     parser.add_argument("--data_type", type=str, default="csqa-debug")
     parser.add_argument("--batch_size", type=int, default=8)
-    parser.add_argument("--source_max_length", type=int, default=256)
-    parser.add_argument("--target_max_length", type=int, default=64)
-    parser.add_argument("--epochs", type=int, default=10)
+    parser.add_argument("--source_max_length", type=int, default=512)
+    parser.add_argument("--target_max_length", type=int, default=128)
+    parser.add_argument("--epochs", type=int, default=5)
     args = parser.parse_args()
 
+    print(f"Running mode: {args.mode}")
     print(f"Running on machine: {args.machine}")
     print(f"The home path is{os.environ['HOME']}")
 
@@ -156,20 +172,22 @@ if __name__ == "__main__":
         exit(1)
 
     # sweep configuration
+    sweep_name = f"T5HS_{args.machine}_{args.data_type}"
     sweep_config = {
-        "name": "T5 Hyperparameter Search",
+        "name": sweep_name,
         "method": "grid",  # or "bayes"
         "metric": {
             "name": "Validation Loss",
             "goal": "minimize",
         },
         "parameters": {
-            "batch_size": {"values": [3, 4,]},
+            "batch_size": {"values": [5]},
             "source_max_length": {"values": [512]},
             "target_max_length": {"values": [128]},
             "epochs": {"values": [5]},
             "model_name": {"value": args.model_name},
             "data_type": {"value": args.data_type},
+            "mode": {"value": args.mode},
         },
     }
 
@@ -181,10 +199,11 @@ if __name__ == "__main__":
 
     if args.mode == 'sweeps':
         sweep_id = wandb.sweep(sweep_config, project='FinalThesis2023', entity='haoz')
-        wandb.agent(sweep_id, function=main)
+        wandb.agent(sweep_id, function=main, count=1)
     elif args.mode == 'train':
         # Fetch hyperparameters from args
         config = {
+            "mode": args.mode,
             "batch_size": args.batch_size,
             "source_max_length": args.source_max_length,
             "target_max_length": args.target_max_length,
