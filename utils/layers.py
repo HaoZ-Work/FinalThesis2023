@@ -636,6 +636,39 @@ class CustomizedEmbedding(nn.Module):
                 return self.emb(index) * self.scale
 
 
+class T5AvgPooler(nn.Module):
+    '''
+    T5AvgPooler
+    '''
+    def __init__(self, config):
+        super().__init__()
+        self.dense = nn.Linear(config.d_model, config.d_model)
+        self.activation = nn.Tanh()
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        # Average pooling
+        avg_pooled_output = hidden_states.mean(dim=1)
+        pooled_output = self.dense(avg_pooled_output)
+        pooled_output = self.activation(pooled_output)
+        return pooled_output
+
+class T5MaxPooler(nn.Module):
+    '''
+    T5MaxPooler
+    '''
+    def __init__(self, config):
+        super().__init__()
+        self.dense = nn.Linear(config.d_model, config.d_model)
+        self.activation = nn.Tanh()
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        # Max pooling
+        max_pooled_output = hidden_states.max(dim=1)[0]
+        pooled_output = self.dense(max_pooled_output)
+        pooled_output = self.activation(pooled_output)
+        return pooled_output
+
+
 def run_test():
     print('testing BilinearAttentionLayer...')
     att = BilinearAttentionLayer(100, 20)

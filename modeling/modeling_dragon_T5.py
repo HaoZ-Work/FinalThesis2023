@@ -239,6 +239,7 @@ class LMGNN(PreTrainedModelClass):
                                          sep_ie_layers=sep_ie_layers)  # this is equivalent to BertModel
 
         if args.mlm_task:
+            ## TODO: is this correct?
             self.lm_head = nn.Linear(config.d_model, config.vocab_size, bias=False)
 
         self.layer_id = layer_id
@@ -330,8 +331,8 @@ class LMGNN(PreTrainedModelClass):
         # LM outputs
         all_hidden_states = lm_outputs[-1] # ([bs, seq_len, sent_dim] for _ in range(7))
         lm_hidden_states = all_hidden_states[self.layer_id] # [bs, seq_len, sent_dim]
-        sent_vecs = t5gnn.pooler(lm_hidden_states, attention_mask.to(torch.bool)) # [bs, sent_dim]
-        # TODO: check why sent_vecs is nan when test (meanpooler is nan, maxpooler is not -inf)
+        sent_vecs = t5gnn.pooler(lm_hidden_states) # [bs, sent_dim]
+        # TODO: check if this is correct
         # The original does not have this problem
 
         # sent_token_mask = output_mask.clone()
@@ -810,7 +811,8 @@ class TextKGMessagePassing(ModelClass):
         self.encoder = T5GAT(config, args, k=k, n_ntype=n_ntype, n_etype=n_etype, hidden_size=concept_dim, dropout=dropout, concept_dim=concept_dim, ie_dim=ie_dim, p_fc=p_fc, info_exchange=info_exchange, ie_layer_num=ie_layer_num, sep_ie_layers=sep_ie_layers)
 
         # TODO: check if this is correct,which kind of pooling to use?
-        self.pooler = layers.MeanPoolLayer()
+        self.pooler = layers.T5AvgPooler(config)
+        # self.pooler = layers.T5MaxPooler(config)
 
         self.sent_dim = config.hidden_size
 
@@ -897,7 +899,7 @@ class TextKGMessagePassing(ModelClass):
         sequence_output = encoder_outputs[0]
 
         ## TODO: check if this is correct,should we pooler layer or which pooler should we use with T5
-        pooled_output = self.pooler(sequence_output,attention_mask.to(torch.bool))
+        pooled_output = self.pooler(sequence_output)
         # print("pooled_output", pooled_output.size()) #[20, 512] [bs, dim]
 
         outputs = (sequence_output, pooled_output,) + encoder_outputs[1:]  # add hidden_states and attentions if they are here
@@ -1476,5 +1478,5 @@ if __name__ == "__main__":
     # test_T5GAT(device)
     # test_TextKGMessagePassing(device)
 
-    # test_LMGNN(device)
-    test_DRAGON(device)
+    test_LMGNN(device)
+    # test_DRAGON(device)
