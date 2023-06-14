@@ -618,7 +618,7 @@ class DRAGON_DataLoader(object):
 
         if use_cache and not os.path.exists(cache_path):
             use_cache = False
-        use_cache = False ## TODO: remove this line
+        # use_cache = False ## TODO: remove this line
 
         if use_cache:
             print (f'Loading cache {cache_path}')
