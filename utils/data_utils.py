@@ -10,8 +10,9 @@ import numpy as np
 from tqdm import tqdm
 from typing import Any, Callable, Dict, List, NewType, Optional, Tuple, Union
 from transformers import (OPENAI_GPT_PRETRAINED_CONFIG_ARCHIVE_MAP, BERT_PRETRAINED_CONFIG_ARCHIVE_MAP,
-                          XLNET_PRETRAINED_CONFIG_ARCHIVE_MAP, ROBERTA_PRETRAINED_CONFIG_ARCHIVE_MAP)
-from transformers import (OpenAIGPTTokenizer, BertTokenizer, BertTokenizerFast, XLNetTokenizer, RobertaTokenizer, RobertaTokenizerFast)
+                          XLNET_PRETRAINED_CONFIG_ARCHIVE_MAP, ROBERTA_PRETRAINED_CONFIG_ARCHIVE_MAP,
+                          T5_PRETRAINED_CONFIG_ARCHIVE_MAP)
+from transformers import (T5Tokenizer ,T5TokenizerFast , OpenAIGPTTokenizer, BertTokenizer, BertTokenizerFast, XLNetTokenizer, RobertaTokenizer, RobertaTokenizerFast)
 try:
     from transformers import ALBERT_PRETRAINED_CONFIG_ARCHIVE_MAP
     from transformers import AlbertTokenizer
@@ -27,6 +28,7 @@ MODEL_CLASS_TO_NAME = {
     'bert': list(BERT_PRETRAINED_CONFIG_ARCHIVE_MAP.keys()),
     'xlnet': list(XLNET_PRETRAINED_CONFIG_ARCHIVE_MAP.keys()),
     'roberta': list(ROBERTA_PRETRAINED_CONFIG_ARCHIVE_MAP.keys()),
+    't5': list(T5_PRETRAINED_CONFIG_ARCHIVE_MAP.keys()),
     'lstm': ['lstm'],
 }
 try:
@@ -173,7 +175,9 @@ class MultiGPUSparseAdjDataBatchGenerator(object):
         Prepare masked tokens inputs/labels for masked language modeling: 80% MASK, 10% random, 10% original.
         """
         assert inputs.size() == mask_labels.size()
-
+        ## TODO: t5 tokenizer does not have mask token, we force it to be [MASK], this might be problematic
+        if 't5' in self.tokenizer.name_or_path:
+            self.tokenizer.mask_token = '[MASK]'
         if self.tokenizer.mask_token is None:
             raise ValueError(
                 "This tokenizer does not have a mask token which is necessary for masked language modeling. Remove the --mlm flag if you want to use this tokenizer."
@@ -236,6 +240,18 @@ class MultiGPUSparseAdjDataBatchGenerator(object):
                     after_special_tok = True
                     continue
                 if len(cand_indexes) >= 1 and (not after_special_tok) and (not token.startswith("Ġ")):
+                    cand_indexes[-1].append(i)
+                else:
+                    cand_indexes.append([i])
+                after_special_tok = False
+                effective_num_toks += 1
+        elif isinstance(self.tokenizer, (T5Tokenizer, T5TokenizerFast)):
+            after_special_tok = False
+            for (i, token) in enumerate(input_tokens):
+                if token in ["</s>", "<pad>"] or token.startswith("<extra_id_"):
+                    after_special_tok = True
+                    continue
+                if len(cand_indexes) >= 1 and (not after_special_tok):
                     cand_indexes[-1].append(i)
                 else:
                     cand_indexes.append([i])
@@ -549,9 +565,11 @@ class DRAGON_DataLoader(object):
     def load_resources(self, kg):
         # Load the tokenizer
         try:
-            tokenizer_class = {'bert': BertTokenizer, 'xlnet': XLNetTokenizer, 'roberta': RobertaTokenizer, 'albert': AlbertTokenizer}.get(self.model_type)
+            tokenizer_class = {'t5': T5Tokenizer,'bert': BertTokenizer, 'xlnet': XLNetTokenizer, 'roberta': RobertaTokenizer, 'albert': AlbertTokenizer, }.get(self.model_type)
         except:
             tokenizer_class = {'bert': BertTokenizer, 'xlnet': XLNetTokenizer, 'roberta': RobertaTokenizer}.get(self.model_type)
+
+
         tokenizer = tokenizer_class.from_pretrained(self.model_name)
         self.tokenizer = tokenizer
 
@@ -600,6 +618,7 @@ class DRAGON_DataLoader(object):
 
         if use_cache and not os.path.exists(cache_path):
             use_cache = False
+        use_cache = False ## TODO: remove this line
 
         if use_cache:
             print (f'Loading cache {cache_path}')
@@ -628,8 +647,10 @@ class DRAGON_DataLoader(object):
                 raise NotImplementedError
             elif self.model_type in ('gpt',):
                 input_tensors = load_gpt_input_tensors(input_jsonl_path, max_seq_length)
-            elif self.model_type in ('bert', 'xlnet', 'roberta', 'albert'):
+            elif self.model_type in ('bert', 'xlnet', 'roberta', 'albert','t5'):
                 input_tensors = load_bert_xlnet_roberta_input_tensors(input_jsonl_path, max_seq_length, self.debug, self.tokenizer, self.debug_sample_size)
+            # elif self.model_type in ('t5',): ## TODO: need a func to deal input for t5 (Might not be needed)
+            #     raise NotImplementedError
             if not self.debug:
                 if self.args.local_rank in [-1, 0]:
                     print ('saving cache...', file=sys.stderr)
@@ -1016,7 +1037,6 @@ def load_gpt_input_tensors(statement_jsonl_path, max_seq_length):
 
 
 
-
 ######################### BERT/XLNet/Roberta loader utils #########################
 class InputExample(object):
 
@@ -1105,10 +1125,15 @@ def load_bert_xlnet_roberta_input_tensors(statement_jsonl_path, max_seq_length, 
 
     def convert_features_to_tensors(features):
         all_input_ids = torch.tensor(select_field(features, 'input_ids'), dtype=torch.long)
+        # all_iput_ids [batch_size, num_choices, max_seq_length]
         all_input_mask = torch.tensor(select_field(features, 'input_mask'), dtype=torch.long)
+        # all_input_mask [batch_size, num_choices, max_seq_length]
         all_segment_ids = torch.tensor(select_field(features, 'segment_ids'), dtype=torch.long)
+        # all_segment_ids [batch_size, num_choices, max_seq_length]
         all_output_mask = torch.tensor(select_field(features, 'output_mask'), dtype=torch.bool)
+        # all_output_mask [batch_size, num_choices, max_seq_length]
         all_label = torch.tensor([f.label for f in features], dtype=torch.long)
+        # all_label [batch_size]
         return all_input_ids, all_input_mask, all_segment_ids, all_output_mask, all_label
 
     examples = read_examples(statement_jsonl_path)
@@ -1133,3 +1158,80 @@ def load_bert_xlnet_roberta_input_tensors(statement_jsonl_path, max_seq_length, 
     example_ids = [f.example_id for f in features]
     *data_tensors, all_label = convert_features_to_tensors(features)
     return example_ids, all_label, data_tensors, concepts_by_sents_list
+
+
+
+######################### T5 loader utils #########################
+
+#
+# def simple_convert_examples_to_features_t5(examples, label_list, max_seq_length, tokenizer, debug=False):
+#     """ Loads a data file into a list of `InputBatch`s for T5 model. """
+#     label_map = {label: i for i, label in enumerate(label_list)}
+#
+#     features = []
+#     concepts_by_sents_list = []
+#     for ex_index, example in tqdm(enumerate(examples), total=len(examples), desc="Converting examples to features"):
+#         if debug and ex_index >= debug_sample_size:
+#             break
+#         choices_features = []
+#         for ending_idx, (context, ending) in enumerate(zip(example.contexts, example.endings)):
+#             # In T5, task-specific details are provided in the input sequence.
+#             # So, we append the question with the ending and then concatenate with the context.
+#             ans = "question: " + example.question + " answer: " + ending + " context: " + context
+#
+#             encoded_input = tokenizer(ans, padding="max_length", truncation=True, max_length=max_seq_length,
+#                                       return_special_tokens_mask=True)
+#             input_ids = encoded_input["input_ids"]
+#             output_mask = encoded_input["special_tokens_mask"]
+#             input_mask = encoded_input["attention_mask"]
+#
+#             assert len(input_ids) == max_seq_length
+#             assert len(output_mask) == max_seq_length
+#             assert len(input_mask) == max_seq_length
+#
+#             choices_features.append((input_ids, input_mask, output_mask))
+#
+#         label = label_map.get(example.label, -100)
+#         features.append(InputFeatures(example_id=example.example_id, choices_features=choices_features, label=label))
+#
+#     return features, concepts_by_sents_list
+#
+#
+# def load_t5_input_tensors(statement_jsonl_path, max_seq_length, debug, tokenizer, debug_sample_size):
+#
+#     def select_field(features, field):
+#         return [[choice[field] for choice in feature.choices_features] for feature in features]
+#
+#     def convert_features_to_tensors(features):
+#         all_input_ids = torch.tensor(select_field(features, 'input_ids'), dtype=torch.long)
+#         all_input_mask = torch.tensor(select_field(features, 'input_mask'), dtype=torch.long)
+#         all_output_mask = torch.tensor(select_field(features, 'output_mask'), dtype=torch.bool)
+#         all_label = torch.tensor([f.label for f in features], dtype=torch.long)
+#         return all_input_ids, all_input_mask, all_output_mask, all_label
+#
+#     examples = read_examples(statement_jsonl_path)
+#     num_workers = 60
+#     if num_workers <= 1:
+#         features, concepts_by_sents_list = simple_convert_examples_to_features(examples, list(range(len(examples[0].endings))), max_seq_length, tokenizer, debug)
+#     else:
+#         from copy import deepcopy
+#         from multiprocessing import Pool
+#         c_size = len(examples)//num_workers +1
+#         examples_list   = [examples[i*c_size: (i+1)*c_size]      for i in range(num_workers)]
+#         label_list_list = [list(range(len(examples[0].endings))) for i in range(num_workers)]
+#         max_seq_length_list = [max_seq_length      for i in range(num_workers)]
+#         tokenizer_list      = [deepcopy(tokenizer) for i in range(num_workers)]
+#         with Pool(num_workers) as p:
+#             ress = list(p.starmap(simple_convert_examples_to_features, zip(examples_list, label_list_list, max_seq_length_list, tokenizer_list)))
+#         features, concepts_by_sents_list = [], []
+#         for res in ress:
+#             features += res[0]
+#             concepts_by_sents_list += res[1]
+#
+#     example_ids = [f.example_id for f in features]
+#     *data_tensors, all_label = convert_features_to_tensors(features)
+#     return example_ids, all_label, data_tensors, concepts_by_sents_list
+#
+#
+#
+#

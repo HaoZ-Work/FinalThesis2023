@@ -17,8 +17,8 @@ except:
     from transformers import get_constant_schedule, get_constant_schedule_with_warmup,  get_linear_schedule_with_warmup
 import wandb
 
-from modeling import modeling_dragon
-# from modeling import modeling_dragon_T5 as modeling_dragon
+# from modeling import modeling_dragon
+from modeling import modeling_dragon_T5 as modeling_dragon
 from utils import data_utils
 from utils import optimization_utils
 from utils import parser_utils
@@ -259,9 +259,14 @@ def train(args, resume, has_test_split, devices, kg):
         test_dataloader = dataset.test()
 
     model = construct_model(args, kg, dataset)
-    INHERIT_BERT = os.environ.get('INHERIT_BERT', 0)
-    bert_or_roberta = model.lmgnn.bert if INHERIT_BERT else model.lmgnn.roberta
-    bert_or_roberta.resize_token_embeddings(len(dataset.tokenizer))
+    LM_BASE_MODEL = os.environ.get('LM_BASE_MODEL', 0)
+    if LM_BASE_MODEL==0:
+        lm_base_model = model.lmgnn.t5
+    elif LM_BASE_MODEL==1:
+        lm_base_model = model.lmgnn.bert
+    elif LM_BASE_MODEL==2:
+        lm_base_model = model.lmgnn.roberta
+    lm_base_model.resize_token_embeddings(len(dataset.tokenizer))
 
     # Get the names of the loaded LM parameters
     loading_info = model.loading_info
@@ -579,9 +584,17 @@ def evaluate(args, has_test_split, devices, kg):
     if has_test_split:
         test_dataloader = dataset.test()
     model = construct_model(args, kg, dataset)
-    INHERIT_BERT = os.environ.get('INHERIT_BERT', 0)
-    bert_or_roberta = model.lmgnn.bert if INHERIT_BERT else model.lmgnn.roberta
-    bert_or_roberta.resize_token_embeddings(len(dataset.tokenizer))
+
+    LM_BASE_MODEL = os.environ.get('LM_BASE_MODEL', 0)
+    if LM_BASE_MODEL==0:
+        lm_base_model = model.lmgnn.t5
+    elif LM_BASE_MODEL==1:
+        lm_base_model = model.lmgnn.bert
+    elif LM_BASE_MODEL==2:
+        lm_base_model = model.lmgnn.roberta
+    lm_base_model.resize_token_embeddings(len(dataset.tokenizer))
+    # bert_or_roberta = model.lmgnn.bert if INHERIT_BERT else model.lmgnn.roberta
+    # bert_or_roberta.resize_token_embeddings(len(dataset.tokenizer))
 
     model.load_state_dict(checkpoint["model"], strict=False)
     epoch_id = checkpoint.get('epoch', 0)
