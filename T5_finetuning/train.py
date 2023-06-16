@@ -8,6 +8,10 @@ from data_utils import DataLoaderCreator
 import argparse
 from tqdm import tqdm
 import wandb
+from torch.optim import Adam  # import Adam optimizer
+from torch.optim.lr_scheduler import StepLR
+
+
 
 import random
 import numpy as np
@@ -39,32 +43,29 @@ def normalize_answer(s):
 
     return white_space_fix(remove_articles(remove_punc(lower(s))))
 
-def calculate_accuracy(model, tokenizer, dataloader, device):
+def calculate_accuracy(model, tokenizer, batch, device):
     model.eval()
     correct_predictions = 0
     total_predictions = 0
     pad_token_id = tokenizer.pad_token_id  # get the ID for the <pad> token
 
+    input_ids = batch["input_ids"].to(device)
+    attention_mask = batch["attention_mask"].to(device)
+    labels = batch["labels"].to(device)
 
-    with torch.no_grad():
-        for i, batch in tqdm(enumerate(dataloader), total=len(dataloader), desc="Calculating Accuracy"):
-            input_ids = batch["input_ids"].to(device)
-            attention_mask = batch["attention_mask"].to(device)
-            labels = batch["labels"].to(device)
+    # replace -100 in the labels with pad_token_id
+    labels = labels.where(labels != -100, torch.tensor(pad_token_id, device=device))
 
-            # replace -100 in the labels with pad_token_id
-            labels = labels.where(labels != -100, torch.tensor(pad_token_id, device=device))
+    # forward pass
+    outputs = model.generate(input_ids=input_ids, attention_mask=attention_mask)
 
-            # forward pass
-            outputs = model.generate(input_ids=input_ids, attention_mask=attention_mask)
+    # convert model output tensors to strings
+    predicted_texts = [normalize_answer(tokenizer.decode(t, skip_special_tokens=True)) for t in outputs]
+    actual_texts = [normalize_answer(tokenizer.decode(t, skip_special_tokens=True)) for t in labels]
 
-            # convert model output tensors to strings
-            predicted_texts = [normalize_answer(tokenizer.decode(t, skip_special_tokens=True)) for t in outputs]
-            actual_texts = [normalize_answer(tokenizer.decode(t, skip_special_tokens=True)) for t in labels]
-            # print("Predicted Texts: ", predicted_texts, "\nActual Texts: ", actual_texts)
-            # compare predictions to actuals
-            correct_predictions += sum([actual == predicted for actual, predicted in zip(actual_texts, predicted_texts)])
-            total_predictions += len(actual_texts)
+    # compare predictions to actuals
+    correct_predictions += sum([actual == predicted for actual, predicted in zip(actual_texts, predicted_texts)])
+    total_predictions += len(actual_texts)
 
     # calculate accuracy
     accuracy = correct_predictions / total_predictions
@@ -72,7 +73,7 @@ def calculate_accuracy(model, tokenizer, dataloader, device):
     return accuracy
 
 
-def train_model(model, optimizer, train_dataloader, dev_dataloader, config, tokenizer):
+def train_model(model, optimizer, scheduler, train_dataloader, dev_dataloader, config, tokenizer):
     device = model.device
     args = config
     # create directory for checkpoints
@@ -90,6 +91,8 @@ def train_model(model, optimizer, train_dataloader, dev_dataloader, config, toke
 
         # Train
         model.train()
+        correct_predictions = 0
+        total_predictions = 0
         for i, batch in tqdm(enumerate(train_dataloader), total=len(train_dataloader), desc="Training"):
             input_ids = batch["input_ids"].to(device)
             attention_mask = batch["attention_mask"].to(device)
@@ -105,19 +108,32 @@ def train_model(model, optimizer, train_dataloader, dev_dataloader, config, toke
             loss.backward()
             optimizer.step()
 
+            # step the scheduler
+            scheduler.step()
+
             step += 1
 
             # clear the gradients
             optimizer.zero_grad()
 
-            # log the loss
-            wandb.log({"Train Loss": loss.item()})
+            # calculate train accuracy
+            train_accuracy = calculate_accuracy(model, tokenizer, batch, device)
+            correct_predictions += train_accuracy * len(input_ids)
+            total_predictions += len(input_ids)
 
-            # Call calculate_accuracy every 100 steps
+            # log the loss and accuracy
+            wandb.log({"Train Loss": loss.item(), "Train Accuracy": train_accuracy})
+
+            # Call calculate_accuracy every 100 steps for validation set
             if step % 100 == 0:
                 accuracy = calculate_accuracy(model, tokenizer, dev_dataloader, device)
                 print(f"Validation Accuracy at step {step}: {accuracy}")
                 wandb.log({"Validation Accuracy": accuracy})
+
+        # logging final accuracy after each epoch
+        epoch_accuracy = correct_predictions / total_predictions
+        print(f"Training Accuracy after epoch {epoch + 1}: {epoch_accuracy}")
+        wandb.log({"Epoch Train Accuracy": epoch_accuracy})
 
         # Evaluate on dev set
         model.eval()
@@ -155,14 +171,14 @@ def main(config=None):
     set_seed(42)
 
     if config != None:
-        run_name = f"{config['mode']}_bs{config['batch_size']}_e{config['epochs']}"
+        run_name = f"{config['mode']}_bs{config['batch_size']}_lr{config['lr']}_e{config['epochs']}"
 
         run = wandb.init(project='FinalThesis2023', entity='haoz', name=run_name, config=config)
     else:
 
         run = wandb.init(project='FinalThesis2023', entity='haoz', config=config)
         config = run.config
-        run_name = f"{config['mode']}_bs{config['batch_size']}_e{config['epochs']}"
+        run_name = f"{config['mode']}_bs{config['batch_size']}_lr{config['lr']}_e{config['epochs']}"
         wandb.run.name = run_name
         wandb.run.save()
 
@@ -181,7 +197,9 @@ def main(config=None):
     model = model.to(device)
 
     # initialize optimizer
-    optimizer = Adafactor(model.parameters(), relative_step=True, warmup_init=True)
+    # optimizer = Adafactor(model.parameters(), relative_step=True, warmup_init=True)
+    optimizer = Adam(model.parameters(), lr=args.lr)
+    scheduler = StepLR(optimizer, step_size=100, gamma=0.1)
 
     # Initialize dataloaders using DataLoaderCreator
     data_loader_creator = DataLoaderCreator(tokenizer,source_max_length=args.source_max_length, target_max_length=args.target_max_length, batch_size=args.batch_size)
@@ -191,7 +209,7 @@ def main(config=None):
     wandb.watch(model, log_freq=100)
 
     # Train the model
-    train_model(model, optimizer, train_dataloader, dev_dataloader, args, tokenizer)
+    train_model(model, optimizer,scheduler, train_dataloader, dev_dataloader, args, tokenizer)
 
 
 
@@ -203,6 +221,8 @@ if __name__ == "__main__":
     parser.add_argument("--model_name", type=str, default="t5-small")
     parser.add_argument("--data_type", type=str, default="csqa-debug")
     parser.add_argument("--batch_size", type=int, default=8)
+    parser.add_argument("--lr", type=float, default=1e-3)
+
     parser.add_argument("--source_max_length", type=int, default=512)
     parser.add_argument("--target_max_length", type=int, default=128)
     parser.add_argument("--epochs", type=int, default=5)
@@ -223,25 +243,6 @@ if __name__ == "__main__":
     # sweep configuration
     sweep_name = f"T5HS_{args.model_name}_{args.machine}_{args.data_type}"
     # final sweep configuration
-    # sweep_config = {
-    #     "name": sweep_name,
-    #     "method": "grid",  # or "bayes"
-    #     "metric": {
-    #         "name": "Validation Loss",
-    #         "goal": "minimize",
-    #     },
-    #     "parameters": {
-    #         "batch_size": {"values": [4,8,32, 64,128]},
-    #         "source_max_length": {"values": [512]},
-    #         "target_max_length": {"values": [128]},
-    #         "epochs": {"values": [5,10,20,50]},
-    #         "model_name": {"value": args.model_name},
-    #         "data_type": {"value": args.data_type},
-    #         "mode": {"value": args.mode},
-    #     },
-    # }
-
-    # debug sweep configuration
     sweep_config = {
         "name": sweep_name,
         "method": "grid",  # or "bayes"
@@ -250,15 +251,38 @@ if __name__ == "__main__":
             "goal": "minimize",
         },
         "parameters": {
-            "batch_size": {"values": [1]},
+            "batch_size": {"values": [2,4,8,16,32]},
             "source_max_length": {"values": [512]},
             "target_max_length": {"values": [128]},
-            "epochs": {"values": [5,]},
+            "epochs": {"values": [10,]},
+            "lr": {"values": [1e-5,1e-4]},  # add learning rate parameter for sweep
+
             "model_name": {"value": args.model_name},
             "data_type": {"value": args.data_type},
             "mode": {"value": args.mode},
         },
     }
+
+    ## debug sweep configuration
+    # sweep_config = {
+    #     "name": sweep_name,
+    #     "method": "grid",  # or "bayes"
+    #     "metric": {
+    #         "name": "Validation Loss",
+    #         "goal": "minimize",
+    #     },
+    #     "parameters": {
+    #         "batch_size": {"values": [8]},
+    #         "source_max_length": {"values": [512]},
+    #         "target_max_length": {"values": [128]},
+    #         "epochs": {"values": [5,]},
+    #         "lr": {"values": [1e-4, 1e-5,]},  # add learning rate parameter for sweep
+    #
+    #         "model_name": {"value": args.model_name},
+    #         "data_type": {"value": args.data_type},
+    #         "mode": {"value": args.mode},
+    #     },
+    # }
 
     load_dotenv()
     api_key = os.getenv("WANDB_API")
@@ -268,7 +292,7 @@ if __name__ == "__main__":
 
     if args.mode == 'sweeps':
         sweep_id = wandb.sweep(sweep_config, project='FinalThesis2023', entity='haoz')
-        wandb.agent(sweep_id, function=main, count=1)
+        wandb.agent(sweep_id, function=main)
     elif args.mode == 'train':
         # Fetch hyperparameters from args
         config = {
@@ -277,6 +301,7 @@ if __name__ == "__main__":
             "source_max_length": args.source_max_length,
             "target_max_length": args.target_max_length,
             "epochs": args.epochs,
+            "lr": args.lr,  # add learning rate in config
             "model_name": args.model_name,
             "data_type": args.data_type,
         }
