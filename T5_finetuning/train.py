@@ -43,34 +43,47 @@ def normalize_answer(s):
 
     return white_space_fix(remove_articles(remove_punc(lower(s))))
 
-def calculate_accuracy(model, tokenizer, batch, device):
+def calculate_accuracy(model, tokenizer, batch_or_dataloader, device):
     model.eval()
     correct_predictions = 0
     total_predictions = 0
     pad_token_id = tokenizer.pad_token_id  # get the ID for the <pad> token
 
-    input_ids = batch["input_ids"].to(device)
-    attention_mask = batch["attention_mask"].to(device)
-    labels = batch["labels"].to(device)
+    def handle_batch(batch):
+        nonlocal correct_predictions, total_predictions
 
-    # replace -100 in the labels with pad_token_id
-    labels = labels.where(labels != -100, torch.tensor(pad_token_id, device=device))
+        input_ids = batch["input_ids"].to(device)
+        attention_mask = batch["attention_mask"].to(device)
+        labels = batch["labels"].to(device)
 
-    # forward pass
-    outputs = model.generate(input_ids=input_ids, attention_mask=attention_mask)
+        # replace -100 in the labels with pad_token_id
+        labels = labels.where(labels != -100, torch.tensor(pad_token_id, device=device))
 
-    # convert model output tensors to strings
-    predicted_texts = [normalize_answer(tokenizer.decode(t, skip_special_tokens=True)) for t in outputs]
-    actual_texts = [normalize_answer(tokenizer.decode(t, skip_special_tokens=True)) for t in labels]
+        # forward pass
+        outputs = model.generate(input_ids=input_ids, attention_mask=attention_mask)
 
-    # compare predictions to actuals
-    correct_predictions += sum([actual == predicted for actual, predicted in zip(actual_texts, predicted_texts)])
-    total_predictions += len(actual_texts)
+        # convert model output tensors to strings
+        predicted_texts = [normalize_answer(tokenizer.decode(t, skip_special_tokens=True)) for t in outputs]
+        actual_texts = [normalize_answer(tokenizer.decode(t, skip_special_tokens=True)) for t in labels]
+
+        # compare predictions to actuals
+        correct_predictions += sum([actual == predicted for actual, predicted in zip(actual_texts, predicted_texts)])
+        total_predictions += len(actual_texts)
+
+    if isinstance(batch_or_dataloader, torch.utils.data.DataLoader):
+        # If it's a dataloader, iterate over batches
+        with torch.no_grad():
+            for batch in batch_or_dataloader:
+                handle_batch(batch)
+    else:
+        # If it's a single batch, just handle it
+        handle_batch(batch_or_dataloader)
 
     # calculate accuracy
     accuracy = correct_predictions / total_predictions
 
     return accuracy
+
 
 
 def train_model(model, optimizer, scheduler, train_dataloader, dev_dataloader, config, tokenizer):
@@ -199,7 +212,7 @@ def main(config=None):
     # initialize optimizer
     # optimizer = Adafactor(model.parameters(), relative_step=True, warmup_init=True)
     optimizer = Adam(model.parameters(), lr=args.lr)
-    scheduler = StepLR(optimizer, step_size=100, gamma=0.1)
+    scheduler = StepLR(optimizer, step_size=500, gamma=0.1)
 
     # Initialize dataloaders using DataLoaderCreator
     data_loader_creator = DataLoaderCreator(tokenizer,source_max_length=args.source_max_length, target_max_length=args.target_max_length, batch_size=args.batch_size)
@@ -241,7 +254,7 @@ if __name__ == "__main__":
         exit(1)
 
     # sweep configuration
-    sweep_name = f"T5HS_{args.model_name}_{args.machine}_{args.data_type}"
+    sweep_name = f"T5HS_{args.model_name}_{args.machine}_{args.data_type}_lr_decay"
     # final sweep configuration
     sweep_config = {
         "name": sweep_name,
@@ -263,7 +276,7 @@ if __name__ == "__main__":
         },
     }
 
-    ## debug sweep configuration
+    # debug sweep configuration
     # sweep_config = {
     #     "name": sweep_name,
     #     "method": "grid",  # or "bayes"
@@ -272,10 +285,10 @@ if __name__ == "__main__":
     #         "goal": "minimize",
     #     },
     #     "parameters": {
-    #         "batch_size": {"values": [8]},
+    #         "batch_size": {"values": [2]},
     #         "source_max_length": {"values": [512]},
     #         "target_max_length": {"values": [128]},
-    #         "epochs": {"values": [5,]},
+    #         "epochs": {"values": [10,]},
     #         "lr": {"values": [1e-4, 1e-5,]},  # add learning rate parameter for sweep
     #
     #         "model_name": {"value": args.model_name},
