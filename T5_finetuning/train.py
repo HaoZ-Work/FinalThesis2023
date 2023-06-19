@@ -19,7 +19,10 @@ from torch.cuda.amp import autocast, GradScaler
 import random
 import numpy as np
 
-GPUS_PARALLEL= False
+if torch.cuda.device_count() > 1:
+    GPUS_PARALLEL = True
+else:
+    GPUS_PARALLEL = False
 def set_seed(seed):
     random.seed(seed)
     np.random.seed(seed)
@@ -240,8 +243,7 @@ def main(config=None):
 
     # move model to the device
     model = model.to(device)
-    if torch.cuda.device_count() > 1:
-        GPUS_PARALLEL = True
+    if GPUS_PARALLEL:
         print("Let's use", torch.cuda.device_count(), "GPUs!")
         model = torch.nn.DataParallel(model)
 
