@@ -10,13 +10,16 @@ from tqdm import tqdm
 import wandb
 from torch.optim import Adam  # import Adam optimizer
 from torch.optim.lr_scheduler import StepLR
+from torch.cuda.amp import autocast, GradScaler
+from torch.cuda.amp import autocast, GradScaler
+
 
 
 
 import random
 import numpy as np
 
-
+GPUS_PARALLEL= False
 def set_seed(seed):
     random.seed(seed)
     np.random.seed(seed)
@@ -86,12 +89,16 @@ def calculate_accuracy(model, tokenizer, batch_or_dataloader, device):
 
 
 
+
 def train_model(model, optimizer, scheduler, train_dataloader, dev_dataloader, config, tokenizer):
-    device = model.device
+    device = "cuda" if torch.cuda.is_available() else "cpu"
     args = config
     # create directory for checkpoints
     ckpt_dir_name = f"T5_finetuning/checkpoints/bs_{args.batch_size}_opt_{optimizer.__class__.__name__}_epochs_{args.epochs}"
     os.makedirs(ckpt_dir_name, exist_ok=True)
+
+    # Initialize GradScaler for mixed precision training
+    scaler = GradScaler()
 
     # Initialize best validation loss to infinity
     best_val_loss = float("inf")
@@ -112,14 +119,17 @@ def train_model(model, optimizer, scheduler, train_dataloader, dev_dataloader, c
             labels = batch["labels"].to(device)
 
             # forward pass
-            outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
+            with autocast():  # Add autocast context manager for automatic mixed precision
+                outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
 
-            # get the loss
-            loss = outputs.loss
+                # get the loss
+                loss = outputs.loss
+                loss = torch.sum(loss)
 
             # backward pass and optimize
-            loss.backward()
-            optimizer.step()
+            scaler.scale(loss).backward()  # Scale the loss with GradScaler
+            scaler.step(optimizer)  # Carry out the optimizer step with GradScaler
+            scaler.update()  # Update the GradScaler
 
             # step the scheduler
             scheduler.step()
@@ -130,7 +140,16 @@ def train_model(model, optimizer, scheduler, train_dataloader, dev_dataloader, c
             optimizer.zero_grad()
 
             # calculate train accuracy
-            train_accuracy = calculate_accuracy(model, tokenizer, batch, device)
+            if GPUS_PARALLEL:
+                torch.save(model.module.state_dict(), 'temp_model_weights.pth')
+                temp_model = T5ForConditionalGeneration.from_pretrained(args.model_name)  # replace with your actual model class
+                temp_model.load_state_dict(torch.load('temp_model_weights.pth'))
+                temp_model.to(device)
+                temp_model.eval()
+
+                train_accuracy = calculate_accuracy(temp_model, tokenizer, batch, device)
+            else:
+                train_accuracy = calculate_accuracy(model, tokenizer, batch, device)
             correct_predictions += train_accuracy * len(input_ids)
             total_predictions += len(input_ids)
 
@@ -139,7 +158,16 @@ def train_model(model, optimizer, scheduler, train_dataloader, dev_dataloader, c
 
             # Call calculate_accuracy every 100 steps for validation set
             if step % 100 == 0:
-                accuracy = calculate_accuracy(model, tokenizer, dev_dataloader, device)
+                if GPUS_PARALLEL:
+                    torch.save(model.module.state_dict(), 'temp_model_weights.pth')
+                    temp_model = T5ForConditionalGeneration.from_pretrained(args.model_name)  # replace with your actual model class
+                    temp_model.load_state_dict(torch.load('temp_model_weights.pth'))
+                    temp_model.to(device)
+                    temp_model.eval()
+
+                    accuracy = calculate_accuracy(temp_model, tokenizer, dev_dataloader, device)
+                else:
+                    accuracy = calculate_accuracy(model, tokenizer, dev_dataloader, device)
                 print(f"Validation Accuracy at step {step}: {accuracy}")
                 wandb.log({"Validation Accuracy": accuracy})
 
@@ -158,10 +186,13 @@ def train_model(model, optimizer, scheduler, train_dataloader, dev_dataloader, c
                 labels = batch["labels"].to(device)
 
                 # forward pass
-                outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
+                with autocast():  # Add autocast context manager for automatic mixed precision
+                    outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
 
                 # accumulate loss
-                total_loss += outputs.loss.item()
+                sum_loss = torch.sum(outputs.loss)
+
+                total_loss += sum_loss.item()
 
         val_loss = total_loss / len(dev_dataloader)
         print(f"  Validation Loss: {val_loss}")
@@ -178,6 +209,7 @@ def train_model(model, optimizer, scheduler, train_dataloader, dev_dataloader, c
     if best_model_path is not None:
         model.load_state_dict(torch.load(best_model_path))
         print("Loaded best model.")
+
 
 def main(config=None):
     # Start a new run
@@ -204,13 +236,16 @@ def main(config=None):
     # Initialize the model and tokenizer
     tokenizer = T5Tokenizer.from_pretrained(args.model_name)
     model = T5ForConditionalGeneration.from_pretrained(args.model_name)
-    model_vocab_size = model.config.vocab_size
+    # model_vocab_size = model.config.vocab_size
 
     # move model to the device
     model = model.to(device)
+    if torch.cuda.device_count() > 1:
+        GPUS_PARALLEL = True
+        print("Let's use", torch.cuda.device_count(), "GPUs!")
+        model = torch.nn.DataParallel(model)
 
     # initialize optimizer
-    # optimizer = Adafactor(model.parameters(), relative_step=True, warmup_init=True)
     optimizer = Adam(model.parameters(), lr=args.lr)
     scheduler = StepLR(optimizer, step_size=500, gamma=0.1)
 
@@ -254,29 +289,8 @@ if __name__ == "__main__":
         exit(1)
 
     # sweep configuration
-    sweep_name = f"T5HS_{args.model_name}_{args.machine}_{args.data_type}_lr_decay"
+    sweep_name = f"T5HS_{args.model_name}_{args.machine}_{args.data_type}_lr_decay_bs_64&128"
     # final sweep configuration
-    sweep_config = {
-        "name": sweep_name,
-        "method": "grid",  # or "bayes"
-        "metric": {
-            "name": "Validation Loss",
-            "goal": "minimize",
-        },
-        "parameters": {
-            "batch_size": {"values": [2,4,8,16,32]},
-            "source_max_length": {"values": [512]},
-            "target_max_length": {"values": [128]},
-            "epochs": {"values": [10,]},
-            "lr": {"values": [1e-5,1e-4]},  # add learning rate parameter for sweep
-
-            "model_name": {"value": args.model_name},
-            "data_type": {"value": args.data_type},
-            "mode": {"value": args.mode},
-        },
-    }
-
-    # debug sweep configuration
     # sweep_config = {
     #     "name": sweep_name,
     #     "method": "grid",  # or "bayes"
@@ -285,17 +299,38 @@ if __name__ == "__main__":
     #         "goal": "minimize",
     #     },
     #     "parameters": {
-    #         "batch_size": {"values": [2]},
+    #         "batch_size": {"values": [128,64]},
     #         "source_max_length": {"values": [512]},
     #         "target_max_length": {"values": [128]},
-    #         "epochs": {"values": [10,]},
-    #         "lr": {"values": [1e-4, 1e-5,]},  # add learning rate parameter for sweep
+    #         "epochs": {"values": [50,]},
+    #         "lr": {"values": [1e-4]},  # add learning rate parameter for sweep
     #
     #         "model_name": {"value": args.model_name},
     #         "data_type": {"value": args.data_type},
     #         "mode": {"value": args.mode},
     #     },
     # }
+
+    # debug sweep configuration
+    sweep_config = {
+        "name": sweep_name,
+        "method": "grid",  # or "bayes"
+        "metric": {
+            "name": "Validation Loss",
+            "goal": "minimize",
+        },
+        "parameters": {
+            "batch_size": {"values": [8]},
+            "source_max_length": {"values": [512]},
+            "target_max_length": {"values": [128]},
+            "epochs": {"values": [10,]},
+            "lr": {"values": [1e-4,]},  # add learning rate parameter for sweep
+
+            "model_name": {"value": args.model_name},
+            "data_type": {"value": args.data_type},
+            "mode": {"value": args.mode},
+        },
+    }
 
     load_dotenv()
     api_key = os.getenv("WANDB_API")
