@@ -10,8 +10,6 @@ from tqdm import tqdm
 import wandb
 from torch.optim import Adam  # import Adam optimizer
 from torch.optim.lr_scheduler import StepLR
-from torch.cuda.amp import autocast, GradScaler
-from torch.cuda.amp import autocast, GradScaler
 
 
 
@@ -100,8 +98,7 @@ def train_model(model, optimizer, scheduler, train_dataloader, dev_dataloader, c
     ckpt_dir_name = f"T5_finetuning/checkpoints/bs_{args.batch_size}_opt_{optimizer.__class__.__name__}_epochs_{args.epochs}"
     os.makedirs(ckpt_dir_name, exist_ok=True)
 
-    # Initialize GradScaler for mixed precision training
-    scaler = GradScaler()
+
 
     # Initialize best validation loss to infinity
     best_val_loss = float("inf")
@@ -122,17 +119,14 @@ def train_model(model, optimizer, scheduler, train_dataloader, dev_dataloader, c
             labels = batch["labels"].to(device)
 
             # forward pass
-            with autocast():  # Add autocast context manager for automatic mixed precision
-                outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
+            outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
 
-                # get the loss
-                loss = outputs.loss
-                loss = torch.sum(loss)
+            # get the loss
+            loss = outputs.loss
+            loss = torch.sum(loss)
 
-            # backward pass and optimize
-            scaler.scale(loss).backward()  # Scale the loss with GradScaler
-            scaler.step(optimizer)  # Carry out the optimizer step with GradScaler
-            scaler.update()  # Update the GradScaler
+            loss.backward()
+            optimizer.step()
 
             # step the scheduler
             scheduler.step()
@@ -189,8 +183,7 @@ def train_model(model, optimizer, scheduler, train_dataloader, dev_dataloader, c
                 labels = batch["labels"].to(device)
 
                 # forward pass
-                with autocast():  # Add autocast context manager for automatic mixed precision
-                    outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
+                outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
 
                 # accumulate loss
                 sum_loss = torch.sum(outputs.loss)
@@ -271,11 +264,11 @@ if __name__ == "__main__":
     parser.add_argument("--model_name", type=str, default="t5-small")
     parser.add_argument("--data_type", type=str, default="csqa-debug")
     parser.add_argument("--batch_size", type=int, default=8)
-    parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--lr", type=float, default=1e-4)
 
     parser.add_argument("--source_max_length", type=int, default=512)
     parser.add_argument("--target_max_length", type=int, default=128)
-    parser.add_argument("--epochs", type=int, default=5)
+    parser.add_argument("--epochs", type=int, default=10)
     args = parser.parse_args()
 
     print(f"Running mode: {args.mode}")
