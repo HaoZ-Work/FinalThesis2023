@@ -8,8 +8,9 @@ from preprocess_utils.grounding import create_matcher_patterns, ground
 from preprocess_utils.grounding_umls import ground_umls
 from preprocess_utils.graph import generate_adj_data_from_grounded_concepts
 from preprocess_utils.graph_with_glove import generate_adj_data_from_grounded_concepts__use_glove
-from preprocess_utils.graph_with_LM import generate_adj_data_from_grounded_concepts__use_LM
+# from preprocess_utils.graph_with_LM import generate_adj_data_from_grounded_concepts__use_LM
 from preprocess_utils.graph_umls_with_glove import generate_adj_data_from_grounded_concepts_umls__use_glove
+from preprocess_utils.graph_with_LM_T5 import generate_adj_data_from_grounded_concepts__use_LM
 
 
 input_paths = {
@@ -30,6 +31,12 @@ input_paths = {
         'dev': './data/csqa-debug/dev_rand_split.jsonl',
         'test': './data/csqa-debug/test_rand_split_no_answers.jsonl',
     },
+    'bookcorpus': {
+        'train': './data/bookcorpus/train_rand_split.jsonl',
+        'dev': './data/bookcorpus/dev_rand_split.jsonl',
+        'test': './data/bookcorpus/test_rand_split_no_answers.jsonl',
+    },
+
     'riddle': {
         'train': './data/riddle/train.jsonl',
         'dev':   './data/riddle/devIH.jsonl',
@@ -107,6 +114,23 @@ output_paths = {
             'adj-test': './data/csqa-debug/graph/test.graph.adj.pk',
         },
     },
+    'bookcorpus': {
+        'statement': {
+            'train': './data/bookcorpus/statement/train.statement.jsonl',
+            'dev': './data/bookcorpus/statement/dev.statement.jsonl',
+            'test': './data/bookcorpus/statement/test.statement.jsonl',
+        },
+        'grounded': {
+            'train': './data/bookcorpus/grounded/train.grounded.jsonl',
+            'dev': './data/bookcorpus/grounded/dev.grounded.jsonl',
+            'test': './data/bookcorpus/grounded/test.grounded.jsonl',
+        },
+        'graph': {
+            'adj-train': './data/bookcorpus/graph/train.graph.adj.pk',
+            'adj-dev': './data/bookcorpus/graph/dev.graph.adj.pk',
+            'adj-test': './data/bookcorpus/graph/test.graph.adj.pk',
+        },
+    },
     'riddle': {
         'statement': {
             'train': './data/riddle/statement/train.statement.jsonl',
@@ -168,7 +192,7 @@ for dname in ['medqa']:
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--run', default=['common', 'csqa', 'obqa','csqa_analyze', 'csqa_debug'], nargs='+')
+    parser.add_argument('--run', default=['common', 'csqa', 'obqa','csqa_analyze', 'csqa_debug','bookcorpus'], nargs='+')
     parser.add_argument('-p', '--nprocs', type=int, default=cpu_count(), help='number of processes to use')
     parser.add_argument('--debug', action='store_true', help='enable debug mode')
 
@@ -225,6 +249,20 @@ def main():
             {'func': generate_adj_data_from_grounded_concepts__use_LM, 'args': (output_paths['csqa_debug']['grounded']['dev'], output_paths['cpnet']['pruned-graph'], output_paths['cpnet']['vocab'], output_paths['csqa_debug']['graph']['adj-dev'], args.nprocs)},
             {'func': generate_adj_data_from_grounded_concepts__use_LM, 'args': (output_paths['csqa_debug']['grounded']['train'], output_paths['cpnet']['pruned-graph'], output_paths['cpnet']['vocab'], output_paths['csqa_debug']['graph']['adj-train'], args.nprocs)},
             {'func': generate_adj_data_from_grounded_concepts__use_LM, 'args': (output_paths['csqa_debug']['grounded']['test'], output_paths['cpnet']['pruned-graph'], output_paths['cpnet']['vocab'], output_paths['csqa_debug']['graph']['adj-test'], args.nprocs)},
+        ],
+        'bookcorpus': [
+            {'func': convert_to_entailment, 'args': (input_paths['bookcorpus']['train'], output_paths['bookcorpus']['statement']['train'])},
+            {'func': convert_to_entailment, 'args': (input_paths['bookcorpus']['dev'], output_paths['bookcorpus']['statement']['dev'])},
+            {'func': convert_to_entailment, 'args': (input_paths['bookcorpus']['test'], output_paths['bookcorpus']['statement']['test'])},
+            {'func': ground, 'args': (output_paths['bookcorpus']['statement']['train'], output_paths['cpnet']['vocab'],
+                                        output_paths['cpnet']['patterns'], output_paths['bookcorpus']['grounded']['train'], args.nprocs)},
+               {'func': ground, 'args': (output_paths['bookcorpus']['statement']['dev'], output_paths['cpnet']['vocab'],
+                                       output_paths['cpnet']['patterns'], output_paths['bookcorpus']['grounded']['dev'], args.nprocs)},
+               {'func': ground, 'args': (output_paths['bookcorpus']['statement']['test'], output_paths['cpnet']['vocab'],
+                                       output_paths['cpnet']['patterns'], output_paths['bookcorpus']['grounded']['test'], args.nprocs)},
+                {'func': generate_adj_data_from_grounded_concepts__use_LM, 'args': (output_paths['bookcorpus']['grounded']['train'], output_paths['cpnet']['pruned-graph'], output_paths['cpnet']['vocab'], output_paths['bookcorpus']['graph']['adj-train'], args.nprocs)},
+               {'func': generate_adj_data_from_grounded_concepts__use_LM, 'args': (output_paths['bookcorpus']['grounded']['dev'], output_paths['cpnet']['pruned-graph'], output_paths['cpnet']['vocab'], output_paths['bookcorpus']['graph']['adj-dev'], args.nprocs)},
+               {'func': generate_adj_data_from_grounded_concepts__use_LM, 'args': (output_paths['bookcorpus']['grounded']['test'], output_paths['cpnet']['pruned-graph'], output_paths['cpnet']['vocab'], output_paths['bookcorpus']['graph']['adj-test'], args.nprocs)},
         ],
         'riddle': [
             {'func': convert_to_entailment, 'args': (input_paths['riddle']['train'], output_paths['riddle']['statement']['train'])},
