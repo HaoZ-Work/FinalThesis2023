@@ -18,8 +18,8 @@ blacklist = set(["-PRON-", "actually", "likely", "possibly", "want",
                  "one", "something", "sometimes", "everybody", "somebody", "could", "could_be"
                  ])
 
-
-nltk.download('stopwords', quiet=True)
+# the download_dir is the path where the nltk_data is stored, only need when no permission to write to the default path
+nltk.download('stopwords', quiet=True,download_dir='./nltk_data')
 nltk_stopwords = set(nltk.corpus.stopwords.words('english'))
 
 # CHUNK_SIZE = 1
