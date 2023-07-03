@@ -168,7 +168,7 @@ class DRAGON(nn.Module):
 
     def get_fake_inputs(self, device="cuda:0"):
         bs = 2
-        nc = 5
+        nc = 1
         seq_len = 100
         lm_inputs = torch.zeros([bs, nc, seq_len], dtype=torch.long).to(device)
         lm_labels = torch.zeros([bs, nc, seq_len], dtype=torch.long).to(device)
@@ -204,7 +204,7 @@ class DRAGON(nn.Module):
 
     def check_outputs(self, logits, lm_loss, link_losses):
         bs = 2
-        nc = 5
+        nc = 1
         assert logits.size() == (bs, nc)
         print("logits", logits)
         print("lm_loss", lm_loss)
@@ -312,7 +312,8 @@ class LMGNN(PreTrainedModelClass):
         lm_input_ids, lm_labels, input_ids, attention_mask, token_type_ids, output_mask = inputs
         if self.args.mlm_task:
             input_ids = lm_input_ids
-
+            # lm_input_ids is the input for MLM task, which is the same as input_ids except that some tokens are masked
+            # lm_labels is the corresponding labels for lm_input_ids,
         # GNN inputs
         concept_ids[concept_ids == 0] = self.cpnet_vocab_size + 2
         if self.k >= 0:
