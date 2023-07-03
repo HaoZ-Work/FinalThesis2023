@@ -11,7 +11,7 @@ DATASET_SETTING = {
     'obqa': 'official',
 }
 
-DATASET_NO_TEST = []
+DATASET_NO_TEST = ['bookcorpus']
 
 
 
