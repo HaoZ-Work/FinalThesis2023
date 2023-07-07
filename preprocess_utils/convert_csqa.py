@@ -108,6 +108,9 @@ def create_hypothesis(fitb: str, choice: str, ans_pos: bool) -> str:
     if not fitb.endswith(BLANK_STR):
         choice = choice.rstrip(".")
     # Some questions already have blanks indicated with 2+ underscores
+
+    choice = choice.replace("\\", "")
+
     if not ans_pos:
         try:
             hypothesis = re.sub("__+", choice, fitb)
