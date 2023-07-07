@@ -126,18 +126,32 @@ def ground_qa_pair(qa_pair):
         print("Loaded matcher.")
 
     s, a = qa_pair
-    all_concepts = ground_mentioned_concepts(nlp, matcher, s, a)
-    answer_concepts = ground_mentioned_concepts(nlp, matcher, a)
-    question_concepts = all_concepts - answer_concepts
-    if len(question_concepts) == 0:
-        question_concepts = hard_ground(nlp, s, CPNET_VOCAB)  # not very possible
+    if a in string.punctuation or a in ["''", "``", '...',"` ` '' ? ''"]:
+        all_concepts = ground_mentioned_concepts(nlp, matcher, s)
+        answer_concepts = set()
+        question_concepts = all_concepts - answer_concepts
+        if len(question_concepts) == 0:
+            question_concepts = hard_ground(nlp, s, CPNET_VOCAB)  # not very possible
 
-    if len(answer_concepts) == 0:
-        answer_concepts = hard_ground(nlp, a, CPNET_VOCAB)  # some case
+        # if len(answer_concepts) == 0:
+        #     answer_concepts = hard_ground(nlp, a, CPNET_VOCAB)  # some case
 
-    # question_concepts = question_concepts -  answer_concepts
-    question_concepts = sorted(list(question_concepts))
-    answer_concepts = sorted(list(answer_concepts))
+        # question_concepts = question_concepts -  answer_concepts
+        question_concepts = sorted(list(question_concepts))
+        # answer_concepts = sorted(list(answer_concepts))
+    else:
+        all_concepts = ground_mentioned_concepts(nlp, matcher, s, a)
+        answer_concepts = ground_mentioned_concepts(nlp, matcher, a)
+        question_concepts = all_concepts - answer_concepts
+        if len(question_concepts) == 0:
+            question_concepts = hard_ground(nlp, s, CPNET_VOCAB)  # not very possible
+
+        if len(answer_concepts) == 0:
+            answer_concepts = hard_ground(nlp, a, CPNET_VOCAB)  # some case
+
+        # question_concepts = question_concepts -  answer_concepts
+        question_concepts = sorted(list(question_concepts))
+        answer_concepts = sorted(list(answer_concepts))
     return {"sent": s, "ans": a, "qc": question_concepts, "ac": answer_concepts}
 
 
