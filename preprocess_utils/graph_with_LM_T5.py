@@ -436,18 +436,20 @@ class T5ForMaskedLMwithLoss(T5ForConditionalGeneration):
         return outputs  # (masked_lm_loss), lm_logits,
 
 
-print ('loading pre-trained LM: t5-base')
-
-TOKENIZER = T5Tokenizer.from_pretrained('t5-base')
-LM_MODEL = T5ForMaskedLMwithLoss.from_pretrained('t5-base')
-LM_MODEL.cuda(); LM_MODEL.eval()
+T5MODEL = 't5-large'
+print ('loading pre-trained LM:', T5MODEL)
+#
+TOKENIZER = T5Tokenizer.from_pretrained(T5MODEL)
+LM_MODEL = T5ForMaskedLMwithLoss.from_pretrained(T5MODEL)
+LM_MODEL.cuda();
+LM_MODEL.eval()
 
 print ('loading done')
 
 
 def test_T5ForMaskedLMwithLoss():
     # Instantiate a config object for T5 small model
-    config = T5Config.from_pretrained('t5-base')
+    config = T5Config.from_pretrained(T5MODEL)
     # Instantiate the T5ForMaskedLMwithLoss model
     model = T5ForMaskedLMwithLoss(config)
 
