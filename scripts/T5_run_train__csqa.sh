@@ -6,17 +6,17 @@ export OMP_NUM_THREADS=4
 dt=`date '+%Y%m%d_%H%M%S'`
 
 
-dataset="csqa-debug"
+dataset="csqa"
 shift
-encoder='t5-small'
+encoder='t5-base'
 args=$@
 
 
 elr="1e-5"
 dlr="1e-3"
-bs=2
-mbs=2
-unfreeze_epoch=2
+bs=128
+mbs=32
+unfreeze_epoch=4
 k=5 #num of gnn layers
 residual_ie=2
 gnndim=200
@@ -28,12 +28,12 @@ seed=5
 lr_schedule=warmup_linear
 warmup_steps=100
 
-n_epochs=10
+n_epochs=30
 max_epochs_before_stop=30
 ie_dim=400
 
 
-max_seq_len=100
+max_seq_len=128
 ent_emb=data/cpnet/tzw.ent.npy
 kg=cpnet
 kg_vocab_path=data/cpnet/concept.txt
@@ -47,8 +47,8 @@ resume_id=None
 sep_ie_layers=false
 random_ent_emb=false
 
-fp16=true
-upcast=true
+fp16=false
+upcast=false
 
 load_model_path=models/general_model.pt
 

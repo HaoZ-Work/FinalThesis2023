@@ -6,17 +6,17 @@ export OMP_NUM_THREADS=4
 dt=`date '+%Y%m%d_%H%M%S'`
 
 
-dataset="csqa-debug"
+dataset="csqa"
 shift
-encoder='t5-small'
+encoder='t5-base'
 load_model_path=models/csqa_model.pt
 args=$@
 
 
 elr="1e-5"
 dlr="1e-3"
-bs=2
-mbs=2
+bs=128
+mbs=32
 unfreeze_epoch=2
 k=5 #num of gnn layers
 residual_ie=2
